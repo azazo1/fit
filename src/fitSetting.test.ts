@@ -375,14 +375,14 @@ describe('FitSettingTab - GitHub settings', () => {
 		expect(fakePlugin.settings.owner).toBe('alice');
 	});
 
-	it('should disable extra filtering controls in git-compatible path mode', async () => {
+	it('should hide extra filtering controls in git-compatible path mode', async () => {
 		const fakePlugin: any = {
 			settings: {
 				...EMPTY_SETTINGS,
 				deviceName: '',
 				checkEveryXMinutes: 5,
 				autoSync: 'off',
-				syncHiddenFiles: true,
+				syncHiddenFiles: false,
 				pathFilterMode: 'git',
 				obsidianSyncRules: { '.obsidian/appearance.json': {} },
 			},
@@ -396,8 +396,7 @@ describe('FitSettingTab - GitHub settings', () => {
 		settingTab.localConfigBlock();
 		settingTab.obsidianSyncBlock();
 
-		const hiddenToggle = findToggleByLabel(settingTab.containerEl, 'Sync hidden files')!;
-		expect(hiddenToggle.disabled).toBe(true);
+		expect(findToggleByLabel(settingTab.containerEl, 'Sync hidden files')).toBeNull();
 		expect(settingTab.containerEl.textContent).toContain('Git-compatible path mode');
 		expect(settingTab.containerEl.textContent).not.toContain('Appearance (theme, fonts, CSS snippets)');
 	});

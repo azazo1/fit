@@ -818,21 +818,20 @@ export default class FitSettingTab extends PluginSettingTab {
 					await this.display();
 				}));
 
-		// Hidden files setting
-		new Setting(containerEl)
-			.setName("Sync hidden files")
-			.setDesc("Include files and folders whose names start with '.' (e.g. .gitignore, .env). " +
-				"Disable if you notice slower syncs on a very large vault — " +
-				"it adds a recursive directory scan on each sync. " +
-				"Add a .gitignore to exclude specific hidden paths (e.g. .env, .DS_Store). " +
-				"Disabled in Git-compatible path mode.")
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.syncHiddenFiles)
-				.setDisabled(isGitPathMode)
-				.onChange(async (value) => {
-					this.plugin.settings.syncHiddenFiles = value;
-					await this.plugin.saveSettings();
-				}));
+		if (!isGitPathMode) {
+			new Setting(containerEl)
+				.setName("Sync hidden files")
+				.setDesc("Include files and folders whose names start with '.' (e.g. .gitignore, .env). " +
+					"Disable if you notice slower syncs on a very large vault — " +
+					"it adds a recursive directory scan on each sync. " +
+					"Add a .gitignore to exclude specific hidden paths (e.g. .env, .DS_Store).")
+				.addToggle(toggle => toggle
+					.setValue(this.plugin.settings.syncHiddenFiles)
+					.onChange(async (value) => {
+						this.plugin.settings.syncHiddenFiles = value;
+						await this.plugin.saveSettings();
+					}));
+		}
 	};
 
 	obsidianSyncBlock = () => {
