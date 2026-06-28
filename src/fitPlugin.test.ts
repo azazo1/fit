@@ -217,7 +217,7 @@ describe('FitPlugin persistence lifecycle', () => {
 });
 
 describe('FitPlugin command registration', () => {
-	it('routes the existing sync command to manual sync', async () => {
+	it('keeps the existing sync command and adds manual sync command', async () => {
 		const plugin = makePlugin();
 		mockLoad(plugin, {});
 		plugin.loadLocalStore = vi.fn().mockResolvedValue(undefined) as any;
@@ -239,10 +239,11 @@ describe('FitPlugin command registration', () => {
 
 		expect(plugin.addCommand).toHaveBeenCalledWith(expect.objectContaining({
 			id: 'fit-sync',
-			name: 'Manual Sync',
+			name: 'Fit Sync',
 		}));
-		expect(plugin.addCommand).not.toHaveBeenCalledWith(expect.objectContaining({
+		expect(plugin.addCommand).toHaveBeenCalledWith(expect.objectContaining({
 			id: 'fit-manual-sync',
+			name: 'Manual Sync',
 		}));
 		expect(ManualSyncModal).not.toHaveBeenCalled();
 	});

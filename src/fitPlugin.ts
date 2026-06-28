@@ -375,7 +375,7 @@ export default class FitPlugin extends Plugin {
 	 * Entry point: User clicks ribbon icon or uses command palette
 	 */
 	triggerManualSync = async (): Promise<void> => {
-		await this.openManualSyncWorkspace();
+		await this.executeSyncWithUICoordination('manual');
 	};
 
 	private openManualSyncWorkspace = async (): Promise<void> => {
@@ -407,7 +407,7 @@ export default class FitPlugin extends Plugin {
 	}
 
 	loadRibbonIcons() {
-		this.fitSyncRibbonIconEl = this.addRibbonIcon('github', 'Manual sync', this.triggerManualSync);
+		this.fitSyncRibbonIconEl = this.addRibbonIcon('github', 'Sync to remote', this.triggerManualSync);
 		this.fitSyncRibbonIconEl.addClass('fit-sync-ribbon-el');
 	}
 
@@ -468,8 +468,14 @@ export default class FitPlugin extends Plugin {
 			// Add command to command palette for fit sync
 			this.addCommand({
 				id: 'fit-sync',
-				name: 'Manual Sync',
+				name: 'Fit Sync',
 				callback: this.triggerManualSync
+			});
+
+			this.addCommand({
+				id: 'fit-manual-sync',
+				name: 'Manual Sync',
+				callback: this.openManualSyncWorkspace
 			});
 
 			this.addCommand({
