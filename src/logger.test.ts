@@ -12,18 +12,24 @@ const UTF8_BOM = '\uFEFF';
  */
 function createMockAdapter(initialContent: string | null = null): LogFileAdapter & {
 	content: string | null;
+	siblingContent: Record<string, string>;
 	appendCalls: string[];
+	deleteSiblingCalls: string[];
 	renameToCalls: string[];
 } {
 	const state = {
 		content: initialContent,
+		siblingContent: {} as Record<string, string>,
 		appendCalls: [] as string[],
+		deleteSiblingCalls: [] as string[],
 		renameToCalls: [] as string[]
 	};
 
 	return {
 		get content() { return state.content; },
+		get siblingContent() { return state.siblingContent; },
 		get appendCalls() { return state.appendCalls; },
+		get deleteSiblingCalls() { return state.deleteSiblingCalls; },
 		get renameToCalls() { return state.renameToCalls; },
 		async read(): Promise<string | null> {
 			return state.content;
@@ -32,9 +38,16 @@ function createMockAdapter(initialContent: string | null = null): LogFileAdapter
 			state.appendCalls.push(data);
 			state.content = (state.content ?? '') + data;
 		},
+		async deleteSibling(name: string): Promise<void> {
+			state.deleteSiblingCalls.push(name);
+			delete state.siblingContent[name];
+		},
 		async renameTo(newName: string): Promise<void> {
 			state.renameToCalls.push(newName);
 			// Simulate rotation: content is moved, current file becomes empty
+			if (state.content !== null) {
+				state.siblingContent[newName] = state.content;
+			}
 			state.content = null;
 		}
 	};
@@ -294,6 +307,23 @@ describe('Logger', () => {
 			expect(content.charCodeAt(0)).toBe(0xFEFF);
 			expect(content).toContain('[TRIGGER]');
 			expect(content).toContain('Log rotated');
+		});
+
+		it('should replace existing rotated backup before renaming', async () => {
+			const existingContent = UTF8_BOM + '[2025-01-01T00:00:00.000Z] [EXISTING]\n' + 'x'.repeat(600);
+			const adapter = createMockAdapter(existingContent);
+			adapter.siblingContent['debug.log.0'] = 'old backup';
+			const logger = new Logger({
+				adapter,
+				maxLogSize: 500
+			});
+
+			logger.log('[TRIGGER]', 'data');
+			await logger.flush();
+
+			expect(adapter.deleteSiblingCalls).toEqual(['debug.log.0']);
+			expect(adapter.renameToCalls).toEqual(['debug.log.0']);
+			expect(adapter.siblingContent['debug.log.0']).toBe(existingContent);
 		});
 
 	});

@@ -24,6 +24,11 @@ export interface LogFileAdapter {
 	/** Append data to end of file (creates file if nonexistent) */
 	append(data: string): Promise<void>;
 	/**
+	 * Delete a sibling file with the given name if it exists.
+	 * Used before rotation because Obsidian rename does not overwrite targets.
+	 */
+	deleteSibling?(name: string): Promise<void>;
+	/**
 	 * Rename this log file to a sibling file with the given name.
 	 * Used for log rotation (e.g., "debug.log" -> "debug.log.0").
 	 * @param newName - Simple filename (not a path), must be in same directory
@@ -235,6 +240,7 @@ export class Logger {
 
 				if (needsRotation) {
 					// Rotate old log to .0 and start fresh
+					await this.adapter.deleteSibling?.('debug.log.0');
 					await this.adapter.renameTo('debug.log.0');
 					const rotationHeader = `[${new Date().toISOString()}] [Logger] Log rotated (continued from debug.log.0)\n`;
 					await this.adapter.append('\uFEFF' + rotationHeader + newContent);
@@ -281,6 +287,13 @@ export class FitLogger extends Logger {
 			},
 			async append(data: string): Promise<void> {
 				await vault.adapter.append(logPath, data);
+			},
+			async deleteSibling(name: string): Promise<void> {
+				const dirPath = logPath.substring(0, logPath.lastIndexOf('/'));
+				const targetPath = `${dirPath}/${name}`;
+				if (await vault.adapter.exists(targetPath)) {
+					await vault.adapter.remove(targetPath);
+				}
 			},
 			async renameTo(newName: string): Promise<void> {
 				const dirPath = logPath.substring(0, logPath.lastIndexOf('/'));
