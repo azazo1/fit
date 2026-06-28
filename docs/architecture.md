@@ -4,7 +4,7 @@ High-level system design for the FIT (File gIT) Obsidian plugin.
 
 ## System Overview
 
-FIT enables bidirectional sync between Obsidian vaults and remote git repositories (currently GitHub) with conflict resolution and cross-platform support.
+FIT enables bidirectional sync between Obsidian vaults and remote git repositories with conflict resolution and cross-platform support.
 
 ```mermaid
 graph TB
@@ -32,7 +32,7 @@ graph TB
 ### Vault Abstractions (IVault)
 **Purpose**: Abstract file operations (read/write) for different storage backends
 
-A "vault" represents a complete collection of synced files, whether stored locally (Obsidian vault) or remotely (GitHub repository).
+A "vault" represents a complete collection of synced files, whether stored locally (Obsidian vault) or remotely (hosted git repository).
 
 - **IVault Interface**: Common interface for vault operations
   - **Read operations**: `readFromSource()`, `readFileContent(path)`
@@ -50,6 +50,12 @@ A "vault" represents a complete collection of synced files, whether stored local
   - Creates commits via `applyChanges()` (creates blobs, builds trees, creates commits, updates refs)
   - Handles empty repository case
 
+- **RemoteForgejoVault**: Forgejo/Gitea repository implementation
+  - Fetches branch, tree, and blob state via the `/api/v1` REST API
+  - Owns remote state for the selected Forgejo/Gitea repository
+  - Applies file writes and deletes through the contents API
+  - Reuses the same `IVault<"remote">` contract as GitHub
+
 ### SHA Algorithms and Change Detection
 
 Both local and remote caches use the canonical Git blob SHA format: `SHA1("blob " + byteLength + "\0" + rawBytes)`.
@@ -57,12 +63,12 @@ Both local and remote caches use the canonical Git blob SHA format: `SHA1("blob 
 - **Local SHA** (`LocalVault.fileSha1`): canonical git blob SHA
   - Used for detecting local changes between syncs
   - Stored in `localShas` cache (part of LocalStores in data.json)
-  - Matches GitHub's blob SHA — enables SHA parity optimization (skip download when local SHA equals remote SHA)
+  - Matches hosted git blob SHAs and enables SHA parity optimization when local SHA equals remote SHA
 
-- **Remote SHA** (from GitHub API): same git blob SHA format
+- **Remote SHA** (from remote provider API): same git blob SHA format
   - Used for detecting remote changes between syncs
   - Stored in `lastFetchedRemoteShas` cache (part of LocalStores in data.json)
-  - Returned directly by the GitHub tree API
+  - Returned directly by the remote provider tree API
 
 **Important:**
 - ✅ Local and remote SHAs can be directly compared when encryption is off
@@ -82,7 +88,7 @@ Both local and remote caches use the canonical Git blob SHA format: `SHA1("blob 
 ### Sync Engine (fitSync.ts, fit.ts)
 **Purpose**: Core synchronization logic
 - **Fit**: Coordinator between vaults with clean abstractions
-  - Owns 💾 LocalVault and ☁️ RemoteVault instances (currently RemoteGitHubVault)
+  - Owns LocalVault and the selected remote vault implementation
   - Provides `getLocalChanges()` / `getRemoteChanges()` abstractions
   - Implements sync policy via `shouldSyncPath()` (ignores paths like 📁 `_fit/` and `.obsidian/`)
   - Detects clashes between local and remote changes via `getClashedChanges()`
@@ -93,15 +99,18 @@ Both local and remote caches use the canonical Git blob SHA format: `SHA1("blob 
   - Phases: detect clashes → batch stat filesystem → resolve conflicts → push → pull → persist
   - Handles both sync and push-only operations
 
-**Remote Backend Integration**:
-- Current implementation: GitHub backend with two components:
+**Remote Provider Integration**:
+- Current stable default: GitHub backend with two components:
   - `GitHubConnection`: PAT-based operations (authentication, repo/branch discovery) for settings UI
   - `RemoteGitHubVault`: Repository-specific sync operations using `@octokit/core` with automatic retry handling
-- Architecture supports adding GitLab/Gitea backends via IVault interface (would require corresponding connection classes)
+- Experimental backend: Forgejo/Gitea with two components:
+  - `ForgejoConnection`: API token based operations for authentication, owner/repo suggestions, and branch discovery
+  - `RemoteForgejoVault`: Repository-specific sync operations using Forgejo/Gitea `/api/v1`
+- `Fit.loadSettings()` selects the remote vault from `remoteProvider`, while the settings UI selects the matching connection class.
 
 ### Support Systems
 - **FitLogger**: Cross-platform diagnostic logging (enabled by default, writes to `.obsidian/plugins/fit/debug.log`)
-- **Settings UI**: GitHub authentication and configuration management
+- **Settings UI**: Remote provider authentication and repository configuration management
 - **Notifications**: User feedback during sync operations
 - **Explain Sync Status**: `fitSync.explainStatus()` → `FitStatusModal` — read-only status snapshot (no network); shows pending clashes, oversized files, local changes, auto-sync timing. See [sync-logic.md § Explain Sync Status](sync-logic.md#explain-sync-status).
 
@@ -157,17 +166,18 @@ sequenceDiagram
 ### 📦 Plugin Data
 ```
 .obsidian/plugins/fit/data.json (plain text):
-├── settings
-│   ├── 🔒 pat (GitHub Personal Access Token)
-│   ├── owner, repo, branch
-│   ├── deviceName, avatarUrl
-│   ├── autoSync preferences
-│   └── notification settings
-└── localStore (sync state cache)
-    ├── localShas (file path -> canonical git blob SHA)
-    ├── localSha? (legacy field, present only during migration from pre-v1.6)
-    ├── lastFetchedCommitSha
-    └── lastFetchedRemoteShas (remote file path -> git blob SHA)
+|-- settings
+|   |-- pat (GitHub Personal Access Token)
+|   |-- remoteProvider, forgejoBaseUrl, forgejoToken
+|   |-- owner, repo, branch
+|   |-- deviceName, avatarUrl
+|   |-- autoSync preferences
+|   `-- notification settings
+`-- localStore (sync state cache)
+    |-- localShas (file path -> canonical git blob SHA)
+    |-- localSha? (legacy field, present only during migration from pre-v1.6)
+    |-- lastFetchedCommitSha
+    `-- lastFetchedRemoteShas (remote file path -> git blob SHA)
 
 .obsidian/plugins/fit/debug.log:
 └── Debug logs (when enabled in settings)
@@ -188,7 +198,7 @@ Obsidian Vault:
 ## 🔒 Security Model
 
 ### Data Protection
-- **Credentials**: GitHub PAT stored in 📦 plugin data (currently in plain text)
+- **Credentials**: GitHub PAT or Forgejo/Gitea API token stored in plugin data (currently in plain text)
 - **API Security**: All remote API calls use HTTPS with proper authentication
 - **Local Storage**: No sensitive data in logs or temporary files
 
@@ -205,13 +215,13 @@ Obsidian Vault:
 
 ### Scalability Considerations
 - **Large Repositories**: Handles 1000+ files through paginated API calls
-- **Large Files**: Supports files up to GitHub's 100MB limit
-- **Rate Limiting**: Handled automatically by GitHub API client
+- **Large Files**: GitHub supports files up to its API limits; Forgejo/Gitea depends on server configuration
+- **Rate Limiting**: Handled automatically by GitHub API client; Forgejo/Gitea errors are surfaced through VaultError
 
 ## Extension Points
 
 ### Adding Sync Backends
-Implement the `IVault` interface to support additional remote backends:
+Implement `IRemoteVault` to support additional remote backends:
 
 ```typescript
 interface IVault {
@@ -231,7 +241,7 @@ interface IVault {
 ```
 
 **Example**: Create `RemoteGitLabVault` by:
-1. Implement `IVault` interface
+1. Implement `IRemoteVault`
 2. Use GitLab API to fetch repository tree in `readFromSource()`
 3. Compute SHA hashes from GitLab blobs
 4. Handle GitLab-specific path filtering in `shouldTrackState()`
@@ -240,6 +250,7 @@ interface IVault {
 **Current implementations**:
 - `LocalVault`: Obsidian vault
 - `RemoteGitHubVault`: GitHub repositories
+- `RemoteForgejoVault`: Forgejo/Gitea repositories
 
 ### Custom Conflict Resolution
 Extend `FitSync` class to implement custom conflict resolution strategies:

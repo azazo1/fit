@@ -10,6 +10,7 @@ import { fitLogger } from '@/logger';
 import { LocalStores, parseLocalStore } from '@/localStores';
 import { handleCriticalError } from '@/util/errorHandling';
 import { GitHubConnection } from '@/remotes/githubConnection';
+import { ForgejoConnection } from '@/remotes/forgejoConnection';
 import * as Encryption from "@/encryption";
 import { FitSettings, DEFAULT_SETTINGS, findNewFields } from '@/fitSettings';
 
@@ -50,6 +51,7 @@ export default class FitPlugin extends Plugin {
 	fit: Fit;
 	fitSync: FitSync;
 	githubConnection: GitHubConnection | null;
+	forgejoConnection: ForgejoConnection | null;
 	autoSyncIntervalId: number | null;
 	fitPullRibbonIconEl: HTMLElement;
 	fitPushRibbonIconEl: HTMLElement;
@@ -59,6 +61,7 @@ export default class FitPlugin extends Plugin {
 	private lastGithubConnectionPat: string | null = null; // Track PAT changes
 	private activeManualSyncRequests = 0; // Track number of active manual sync attempts
 	private currentSyncNotice: FitNotice | null = null; // The active sync notice (shared by concurrent requests)
+	private lastRemoteConnectionKey: string | null = null;
 
 	// if settings not configured, open settings to let user quickly setup
 	// Note: this is not a stable feature and might be disabled at any point in the future
@@ -76,7 +79,15 @@ export default class FitPlugin extends Plugin {
 
 	checkSettingsConfigured(): boolean {
 		const actionItems: Array<string> = [];
-		if (this.settings.pat === "") {
+		const provider = this.settings.remoteProvider ?? "github";
+		if (provider === "forgejo") {
+			if (this.settings.forgejoBaseUrl === "") {
+				actionItems.push("provide Forgejo base URL");
+			}
+			if (this.settings.forgejoToken === "") {
+				actionItems.push("provide Forgejo API token");
+			}
+		} else if (this.settings.pat === "") {
 			actionItems.push("provide GitHub personal access token");
 		}
 		if (this.settings.owner === "") {
@@ -376,9 +387,7 @@ export default class FitPlugin extends Plugin {
 
 		const { owner, repo, autoSync, checkEveryXMinutes } = this.settings;
 		const sha = this.localStore.lastFetchedCommitSha;
-		const commitUrl = (owner && repo && sha)
-			? `https://github.com/${owner}/${repo}/tree/${sha}`
-			: null;
+		const commitUrl = this.getCommitUrl(owner, repo, sha);
 		const autoSyncInfo: AutoSyncInfo = {
 			enabled: autoSync !== 'off',
 			intervalMinutes: checkEveryXMinutes,
@@ -391,8 +400,7 @@ export default class FitPlugin extends Plugin {
 
 	loadRibbonIcons() {
 		// Pull from remote then Push to remote if no clashing changes detected during pull
-		// TODO: Update title from "GitHub" to selected remote service when other services are supported.
-		this.fitSyncRibbonIconEl = this.addRibbonIcon('github', 'Sync to GitHub', this.triggerManualSync);
+		this.fitSyncRibbonIconEl = this.addRibbonIcon('github', 'Sync to remote', this.triggerManualSync);
 		this.fitSyncRibbonIconEl.addClass('fit-sync-ribbon-el');
 	}
 
@@ -444,9 +452,7 @@ export default class FitPlugin extends Plugin {
 
 			Encryption.init(this);
 
-			this.githubConnection = this.settings.pat
-				? new GitHubConnection(this.settings.pat)
-				: null;
+			this.updateRemoteConnection();
 			this.fit = new Fit(this.settings, this.localStore, this.app.vault, this.manifest.dir ?? undefined);
 			this.fitSync = new FitSync(this.fit, this.saveLocalStoreCallback);
 			this.settingTab = new FitSettingTab(this.app, this);
@@ -491,22 +497,22 @@ export default class FitPlugin extends Plugin {
 	async loadSettings() {
 		const userSetting = await this.loadData();
 		const settings = Object.assign({}, DEFAULT_SETTINGS, userSetting);
-		const settingsObj: FitSettings = Object.keys(DEFAULT_SETTINGS).reduce(
-			(obj, key: keyof FitSettings) => {
+		const settingsObj: Record<keyof FitSettings, FitSettings[keyof FitSettings]> = { ...DEFAULT_SETTINGS };
+		(Object.keys(DEFAULT_SETTINGS) as Array<keyof FitSettings>).forEach(
+			(key) => {
 				if (settings.hasOwnProperty(key)) {
 					if (key == "checkEveryXMinutes") {
-						obj[key] = Number(settings[key]);
+						settingsObj[key] = Number(settings[key]);
 					}
 					else if (key === "notifyChanges" || key === "notifyConflicts" || key === "enableDebugLogging" || key === "syncHiddenFiles") {
-						obj[key] = Boolean(settings[key]);
+						settingsObj[key] = Boolean(settings[key]);
 					}
 					else {
-						obj[key] = settings[key];
+						settingsObj[key] = settings[key];
 					}
 				}
-				return obj;
-			}, {} as FitSettings);
-		this.settings = settingsObj;
+			});
+		this.settings = settingsObj as FitSettings;
 	}
 
 	// TODO: loadLocalStore and saveLocalStoreCallback are the persistence contract for all
@@ -554,15 +560,33 @@ export default class FitPlugin extends Plugin {
 		// sync settings to Fit class as well upon saving
 		this.fit.loadSettings(this.settings);
 
-		// Update GitHubConnection only when PAT changes
-		if (this.settings.pat !== this.lastGithubConnectionPat) {
-			if (this.settings.pat) {
-				this.githubConnection = new GitHubConnection(this.settings.pat);
-				this.lastGithubConnectionPat = this.settings.pat;
-			} else {
-				this.githubConnection = null;
-				this.lastGithubConnectionPat = null;
-			}
+		this.updateRemoteConnection();
+	}
+
+	private updateRemoteConnection() {
+		const provider = this.settings.remoteProvider ?? "github";
+		const key = provider === "forgejo"
+			? `forgejo:${this.settings.forgejoBaseUrl}:${this.settings.forgejoToken}`
+			: `github:${this.settings.pat}`;
+		if (key === this.lastRemoteConnectionKey) return;
+
+		this.githubConnection = provider === "github" && this.settings.pat
+			? new GitHubConnection(this.settings.pat)
+			: null;
+		this.forgejoConnection = provider === "forgejo" && this.settings.forgejoBaseUrl && this.settings.forgejoToken
+			? new ForgejoConnection(this.settings.forgejoBaseUrl, this.settings.forgejoToken)
+			: null;
+		this.lastGithubConnectionPat = provider === "github" ? this.settings.pat : null;
+		this.lastRemoteConnectionKey = key;
+	}
+
+	private getCommitUrl(owner: string, repo: string, sha: string | null): string | null {
+		if (!owner || !repo || !sha) return null;
+		const provider = this.settings.remoteProvider ?? "github";
+		if (provider === "forgejo") {
+			const baseUrl = this.settings.forgejoBaseUrl.replace(/\/+$/, "");
+			return baseUrl ? `${baseUrl}/${owner}/${repo}/commit/${sha}` : null;
 		}
+		return `https://github.com/${owner}/${repo}/tree/${sha}`;
 	}
 }

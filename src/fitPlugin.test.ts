@@ -57,6 +57,21 @@ function mockSaveImpl(plugin: FitPlugin, impl: (data: any) => Promise<void>) {
 const sha = (s: string) => s as BlobSha;
 
 describe('FitPlugin persistence lifecycle', () => {
+	describe('loadSettings defaults', () => {
+		it('adds remote provider defaults for existing stored settings', async () => {
+			const plugin = makePlugin();
+			mockLoad(plugin, {});
+
+			await plugin.loadSettings();
+
+			expect(plugin.settings).toMatchObject({
+				remoteProvider: 'github',
+				forgejoBaseUrl: '',
+				forgejoToken: '',
+			});
+		});
+	});
+
 	describe('after FitSync saves to store', () => {
 		it('pendingClashes survive a simulated plugin reload', async () => {
 			const plugin = makePlugin();
@@ -123,14 +138,29 @@ describe('FitPlugin persistence lifecycle', () => {
 		it('saveSettings includes localStore fields so concurrent saveLocalStore cannot lose them', async () => {
 			const plugin = makePlugin();
 			plugin.fit = { loadLocalStore: vi.fn(), loadSettings: vi.fn() } as any;
-			plugin.settings = { pat: 'token', owner: 'alice', repo: 'r', branch: 'main', checkEveryXMinutes: 5 } as any;
+			plugin.settings = {
+				remoteProvider: 'forgejo',
+				pat: 'token',
+				forgejoBaseUrl: 'https://git.acodev.top',
+				forgejoToken: 'forgejo-token',
+				owner: 'alice',
+				repo: 'r',
+				branch: 'main',
+				checkEveryXMinutes: 5
+			} as any;
 			plugin.localStore = { localShas: {}, pendingClashes: ['x.md'], lastFetchedCommitSha: null, lastFetchedRemoteShas: {}, lastFetchedRemoteSha: undefined, unpushedFiles: {} };
 			plugin.startOrUpdateAutoSyncInterval = vi.fn() as any;
 
 			await plugin.saveSettings();
 
 			expect(plugin.saveData).toHaveBeenCalledWith(
-				expect.objectContaining({ pat: 'token', pendingClashes: ['x.md'] })
+				expect.objectContaining({
+					remoteProvider: 'forgejo',
+					forgejoBaseUrl: 'https://git.acodev.top',
+					forgejoToken: 'forgejo-token',
+					pat: 'token',
+					pendingClashes: ['x.md']
+				})
 			);
 		});
 

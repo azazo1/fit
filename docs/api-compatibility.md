@@ -1,6 +1,6 @@
 # API Compatibility & Dependency Safety
 
-**Last Updated:** 2025-12-24
+**Last Updated:** 2026-06-28
 
 This document tracks Web APIs and patterns that may have compatibility issues across Obsidian's supported platforms (Desktop/Mobile) and provides guidelines for safe usage.
 
@@ -64,6 +64,15 @@ const str = Array.from(uint8Array, byte => String.fromCharCode(byte)).join('');
 - `arrayBufferToBase64()` - [src/util/obsidianHelpers.ts:9](../src/util/obsidianHelpers.ts#L9)
 - `base64ToArrayBuffer()` - [src/util/obsidianHelpers.ts:5](../src/util/obsidianHelpers.ts#L5)
 - `Vault.readBinary()` - Always use this instead of `vault.read()` for reliable binary detection
+
+### fetch() for Remote Provider APIs
+
+**Status:** Safe - Web API available in Obsidian desktop and mobile runtimes
+
+- `ForgejoConnection` and `RemoteForgejoVault` use `fetch()` against Forgejo/Gitea `/api/v1`
+- Requests use `Authorization: token ...` and JSON request/response bodies
+- No Node.js HTTP, filesystem, process, or SSH APIs are required
+- GitHub support continues to use Octokit, which must remain compatible with the mobile WebView environment
 
 ## Unsafe Patterns to Avoid
 

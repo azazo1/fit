@@ -1,5 +1,5 @@
 import FitPlugin from "@/fitPlugin";
-import { findNewFields, isUiManaged } from "@/fitSettings";
+import { findNewFields, isUiManaged, type RemoteProvider } from "@/fitSettings";
 import { OBSIDIAN_ALWAYS_EXCLUDED, OBSIDIAN_NEEDS_MERGE } from "@/fit";
 import { App, PluginSettingTab, Setting, TextComponent } from "obsidian";
 import { setEqual } from "./utils";
@@ -10,6 +10,12 @@ import FitNotice from "./fitNotice";
 import * as Encryption from "./encryption";
 
 type RefreshCheckPoint = "repo(0)" | "branch(1)" | "link(2)" | "initialize" | "withCache";
+type RemoteConnection = {
+	getAuthenticatedUser(): Promise<{ owner: string; avatarUrl: string }>;
+	getAccessibleOwners(): Promise<string[]>;
+	getReposForOwner(owner: string): Promise<string[]>;
+	getBranches(owner: string, repo: string): Promise<string[]>;
+};
 
 // Known .obsidian/ files with friendly display names.
 // Must use "replace" strategy (v1 only). Paths in OBSIDIAN_ALWAYS_EXCLUDED are not listed.
@@ -27,14 +33,14 @@ const KNOWN_OBSIDIAN_FILES: { label: string; path: string }[] = [
  * Settings UI for Fit plugin.
  *
  * Sections:
- * - GitHub authentication (PAT token)
+ * - Remote provider authentication
  * - Repository configuration (owner/repo/branch)
  * - Local settings (file exclusions, ignored files)
  * - Debug logging toggle
  *
  * Implementation notes:
  * - Owner/repo inputs use AbstractInputSuggest (mobile-friendly autocomplete)
- * - GitHubConnection provides repo discovery and branch listing
+ * - Remote provider connection provides repo discovery and branch listing
  * - Settings saves and branch fetching are debounced (500ms) to reduce API calls
  */
 export default class FitSettingTab extends PluginSettingTab {
@@ -72,10 +78,10 @@ export default class FitSettingTab extends PluginSettingTab {
 
 	/**
 	 * Update input placeholders to reflect current authentication state.
-	 * Call after authentication succeeds or when GitHubConnection becomes available.
+	 * Call after authentication succeeds or when remote provider connection becomes available.
 	 */
 	private updatePlaceholders() {
-		const isAuthenticated = !!this.plugin.githubConnection;
+		const isAuthenticated = this.isRemoteAuthenticated();
 
 		if (this.ownerInputComponent) {
 			this.ownerInputComponent.setPlaceholder(
@@ -92,7 +98,7 @@ export default class FitSettingTab extends PluginSettingTab {
 	/**
 	 * Clear authentication UI state only (not persistent settings).
 	 * Call this when authentication fails temporarily.
-	 * For permanent PAT removal, caller should also clear settings separately.
+	 * For permanent token removal, caller should also clear settings separately.
 	 */
 	private clearAuthState = () => {
 		// Clear only UI state, preserve settings so they work when auth is restored
@@ -111,13 +117,13 @@ export default class FitSettingTab extends PluginSettingTab {
 
 	/**
 	 * Update button enabled/disabled states based on current authentication status.
-	 * Call this whenever PAT or authentication state changes.
+	 * Call this whenever token or authentication state changes.
 	 */
 	private updateButtonStates = () => {
-		const isAuthenticated = !!this.plugin.githubConnection;
+		const isAuthenticated = this.isRemoteAuthenticated();
 
 		if (this.authenticateButtonComponent) {
-			this.authenticateButtonComponent.setDisabled(this.authenticating || !this.plugin.githubConnection);
+			this.authenticateButtonComponent.setDisabled(this.authenticating || !isAuthenticated);
 		}
 
 		if (this.refreshButton) {
@@ -154,9 +160,10 @@ export default class FitSettingTab extends PluginSettingTab {
 		}
 		this.repoFetchDebounceTimer = setTimeout(async () => {
 			this.repoFetchDebounceTimer = null;
-			if (owner && this.plugin.githubConnection) {
+			const connection = this.getRemoteConnection();
+			if (owner && connection) {
 				try {
-					this.existingRepos = await this.plugin.githubConnection.getReposForOwner(owner);
+					this.existingRepos = await connection.getReposForOwner(owner);
 					if (this.repoSuggest) {
 						this.repoSuggest.updateSuggestions(this.existingRepos);
 					}
@@ -171,6 +178,28 @@ export default class FitSettingTab extends PluginSettingTab {
 			}
 		}, 500);
 	};
+
+	private getProvider(): RemoteProvider {
+		return this.plugin.settings.remoteProvider ?? "github";
+	}
+
+	private getProviderLabel(): string {
+		return this.getProvider() === "forgejo" ? "Forgejo" : "GitHub";
+	}
+
+	private getRemoteConnection(): RemoteConnection | null {
+		return this.getProvider() === "forgejo"
+			? this.plugin.forgejoConnection ?? null
+			: this.plugin.githubConnection ?? null;
+	}
+
+	private isRemoteAuthenticated(): boolean {
+		return this.getRemoteConnection() !== null;
+	}
+
+	private getForgejoBaseUrl(): string {
+		return (this.plugin.settings.forgejoBaseUrl ?? "").trim().replace(/\/+$/, "");
+	}
 
 	/**
 	 * Debounced refresh for repo owner/name changes.
@@ -192,6 +221,10 @@ export default class FitSettingTab extends PluginSettingTab {
 	getLatestLink = (): string => {
 		const {owner: owner, repo, branch} = this.plugin.settings;
 		if (owner.length > 0 && repo.length > 0 && branch.length > 0) {
+			if (this.getProvider() === "forgejo") {
+				const baseUrl = this.getForgejoBaseUrl();
+				return baseUrl ? `${baseUrl}/${owner}/${repo}/src/branch/${branch}` : "";
+			}
 			return `https://github.com/${owner}/${repo}/tree/${branch}`;
 		}
 		return "";
@@ -204,17 +237,20 @@ export default class FitSettingTab extends PluginSettingTab {
 		this.authUserAvatar.removeClass('empty');
 		this.authUserAvatar.addClass('cat');
 		try {
-			// Guard: githubConnection is null when no PAT configured
-			if (!this.plugin.githubConnection) {
-				this.plugin.logger.log('[FitSettings] Cannot authenticate without PAT token');
+			const connection = this.getRemoteConnection();
+			const providerLabel = this.getProviderLabel();
+			if (!connection) {
+				this.plugin.logger.log(`[FitSettings] Cannot authenticate without ${providerLabel} token`);
 				this.authUserAvatar.removeClass('cat');
 				this.authUserAvatar.addClass('error');
-				this.authUserHandle.setText('Enter PAT token above');
+				this.authUserHandle.setText(`Enter ${providerLabel} credentials above`);
 				return;
 			}
-			const {owner: authUser, avatarUrl} = await this.plugin.githubConnection.getAuthenticatedUser();
+			const {owner: authUser, avatarUrl} = await connection.getAuthenticatedUser();
 			this.authUserAvatar.removeClass('cat');
-			this.authUserAvatar.createEl('img', { attr: { src: avatarUrl } });
+			if (avatarUrl) {
+				this.authUserAvatar.createEl('img', { attr: { src: avatarUrl } });
+			}
 
 			// Detect if authUser changed by checking the displayed handle
 			const previousAuthUser = this.authUserHandle.textContent;
@@ -259,7 +295,7 @@ export default class FitSettingTab extends PluginSettingTab {
 				if (error.message.includes("network") || error.message.includes("reach")) {
 					errorMessage = "Network error. Check your connection and try again.";
 				} else if (error.message.includes("Authentication") || error.message.includes("401") || error.message.includes("403")) {
-					errorMessage = "Authentication failed. Check your PAT token.";
+					errorMessage = "Authentication failed. Check your token.";
 				}
 			}
 
@@ -280,38 +316,57 @@ export default class FitSettingTab extends PluginSettingTab {
 
 	githubUserInfoBlock = () => {
 		const {containerEl} = this;
+		const provider = this.getProvider();
+		const providerLabel = this.getProviderLabel();
 		new Setting(containerEl).setHeading()
-			.setName("GitHub user info")
+			.setName("Remote provider")
+			.addDropdown(dropdown => dropdown
+				.addOption("github", "GitHub")
+				.addOption("forgejo", "Forgejo or Gitea")
+				.setValue(provider)
+				.onChange(async (value) => {
+					this.plugin.settings.remoteProvider = value as RemoteProvider;
+					this.clearAuthState();
+					await this.plugin.saveSettings();
+					await this.display();
+				}))
 			.addButton(button => {
 				this.authenticateButtonComponent = button;
 				button
 					.setCta()
 					.setButtonText("Authenticate user")
-					.setDisabled(this.authenticating || !this.plugin.githubConnection)
+					.setDisabled(this.authenticating || !this.isRemoteAuthenticated())
 					.onClick(async ()=>{
 						if (this.authenticating) return;
 						await this.handleUserFetch();
 					});
 			});
 		this.authUserSetting = new Setting(containerEl)
-			.setDesc("Input your personal access token below to get authenticated. Create a GitHub account here if you don't have one yet.")
+			.setName(`${providerLabel} account`)
+			.setDesc(provider === "github"
+				? "Input your personal access token below to get authenticated. Create a GitHub account here if you don't have one yet."
+				: "Input your Forgejo or Gitea site URL and API token below to get authenticated.")
 			.addExtraButton(button=>button
-				.setIcon('github')
-				.setTooltip("Sign up on github.com")
+				.setIcon(provider === "github" ? 'github' : 'external-link')
+				.setTooltip(provider === "github" ? "Sign up on github.com" : "Open Forgejo site")
+				.setDisabled(provider === "forgejo" && this.getForgejoBaseUrl().length === 0)
 				.onClick(async ()=>{
-					window.open("https://github.com/signup", "_blank");
+					window.open(provider === "github" ? "https://github.com/signup" : this.getForgejoBaseUrl(), "_blank");
 				}));
 		this.authUserSetting.nameEl.addClass('fit-avatar-container');
 		this.authUserAvatar = this.authUserSetting.nameEl.createDiv({cls: 'fit-avatar-container empty'});
 		this.authUserHandle = this.authUserSetting.nameEl.createEl('span', {cls: 'fit-github-handle'});
 		this.authUserHandle.setText("Unauthenticated");
 
-		// Try to get authenticated user info from GitHubConnection (cached)
-		if (this.plugin.githubConnection) {
-			this.plugin.githubConnection.getAuthenticatedUser().then(({owner, avatarUrl}) => {
+		// Try to get authenticated user info from the active provider connection.
+		const connection = this.getRemoteConnection();
+		if (connection) {
+			connection.getAuthenticatedUser().then(({owner, avatarUrl}) => {
 				this.authUserAvatar.removeClass('empty');
 				this.authUserAvatar.empty();
-				this.authUserAvatar.createEl('img', { attr: { src: avatarUrl } });
+				if (avatarUrl) {
+					this.authUserAvatar.createEl('img', { attr: { src: avatarUrl } });
+				}
 				this.authUserHandle.setText(owner);
 			}).catch(() => {
 				// Authentication failed, keep "Unauthenticated" state
@@ -320,8 +375,60 @@ export default class FitSettingTab extends PluginSettingTab {
 		// hide the control element to make space for authUser
 		this.authUserSetting.controlEl.addClass('fit-avatar-display-text');
 
+		if (provider === "forgejo") {
+			new Setting(containerEl)
+				.setName("Forgejo base URL")
+				.setDesc("Example: https://git.acodev.top")
+				.addText(text => text
+					.setPlaceholder("https://git.example.com")
+					.setValue(this.plugin.settings.forgejoBaseUrl ?? "")
+					.onChange(async (value) => {
+						const hadBaseUrl = !!this.plugin.settings.forgejoBaseUrl;
+						this.plugin.settings.forgejoBaseUrl = value;
+						if (hadBaseUrl && !value) {
+							this.clearAuthState();
+						}
+						await this.plugin.saveSettings();
+						this.updateButtonStates();
+						this.updatePlaceholders();
+					}));
+
+			this.patSetting = new Setting(containerEl)
+				.setName("Forgejo API token")
+				.setDesc('Create a token with repository contents read and write permission.')
+				.addText(text => text
+					.setPlaceholder("Forgejo API token")
+					.setValue(this.plugin.settings.forgejoToken ?? "")
+					.onChange(async (value) => {
+						const hadToken = !!this.plugin.settings.forgejoToken;
+						this.plugin.settings.forgejoToken = value;
+						if (hadToken && !value) {
+							this.clearAuthState();
+							this.plugin.settings.owner = "";
+							this.plugin.settings.repo = "";
+							this.plugin.settings.branch = "";
+							this.ownerInputComponent?.setValue("");
+							this.repoInputComponent?.setValue("");
+						}
+						await this.plugin.saveSettings();
+						this.updateButtonStates();
+						this.updatePlaceholders();
+					}))
+				.addExtraButton(button=>button
+					.setIcon('external-link')
+					.setTooltip("Create a token")
+					.setDisabled(this.getForgejoBaseUrl().length === 0)
+					.onClick(async ()=>{
+						const baseUrl = this.getForgejoBaseUrl();
+						if (baseUrl) {
+							window.open(`${baseUrl}/user/settings/applications`, '_blank');
+						}
+					}));
+			return;
+		}
+
 		this.patSetting = new Setting(containerEl)
-			.setName('Github personal access token')
+			.setName('GitHub personal access token')
 			.setDesc('Make sure Permissions has Contents: "Read and write". Recommended: Limit to selected repository, adjust expiration.')
 			.addText(text => text
 				.setPlaceholder('GitHub personal access token')
@@ -366,7 +473,9 @@ export default class FitSettingTab extends PluginSettingTab {
 
 	repoInfoBlock = async () => {
 		const {containerEl} = this;
-		const isAuthenticated = !!this.plugin.githubConnection;
+		const provider = this.getProvider();
+		const providerLabel = this.getProviderLabel();
+		const isAuthenticated = this.isRemoteAuthenticated();
 		new Setting(containerEl).setHeading().setName("Repository info")
 			.setDesc(isAuthenticated
 				? "Suggestions populate automatically when authenticated. Click refresh to update the lists."
@@ -383,19 +492,23 @@ export default class FitSettingTab extends PluginSettingTab {
 			});
 
 		new Setting(containerEl)
-			.setDesc("Make sure you are logged in to github on your browser.")
+			.setDesc(provider === "github"
+				? "Make sure you are logged in to GitHub on your browser."
+				: "Make sure you are logged in to your Forgejo or Gitea site on your browser.")
 			.addExtraButton(button => button
-				.setIcon('github')
+				.setIcon(provider === "github" ? 'github' : 'external-link')
 				.setTooltip("Create a new repository")
+				.setDisabled(provider === "forgejo" && this.getForgejoBaseUrl().length === 0)
 				.onClick(() => {
-					window.open(`https://github.com/new`, '_blank');
+					const baseUrl = this.getForgejoBaseUrl();
+					window.open(provider === "github" ? `https://github.com/new` : `${baseUrl}/repo/create`, '_blank');
 				}));
 
 		// Repository owner combo box (supports both dropdown suggestions and freeform text)
 		this.ownerSetting = new Setting(containerEl)
 			.setName('Repository owner')
 			.setDesc(isAuthenticated
-				? 'The GitHub username or organization that owns the repository. Select from suggestions or type a custom value.'
+				? `The ${providerLabel} user or organization that owns the repository. Select from suggestions or type a custom value.`
 				: 'Type a custom value, or authenticate above to see suggestions.');
 
 		// Create AbstractInputSuggest for owner suggestions (better mobile UX than datalist)
@@ -420,7 +533,7 @@ export default class FitSettingTab extends PluginSettingTab {
 						}
 
 						// If authenticated, debounced fetch repos for the new owner
-						if (value && this.plugin.githubConnection) {
+						if (value && this.getRemoteConnection()) {
 							this.debouncedFetchReposForOwner(value);
 						}
 					}
@@ -500,14 +613,13 @@ export default class FitSettingTab extends PluginSettingTab {
 
 		this.repoLink = this.getLatestLink();
 		const linkDisplay = new Setting(containerEl)
-			.setName("View your vault on GitHub")
+			.setName(`View your vault on ${providerLabel}`)
 			.setDesc(this.repoLink)
 			.addExtraButton(button => button
 				.setDisabled(this.repoLink.length === 0)
-				.setTooltip("Open on GitHub")
+				.setTooltip(`Open on ${providerLabel}`)
 				.setIcon('external-link')
 				.onClick(() => {
-					console.log(`opening ${this.repoLink}`);
 					window.open(this.repoLink, '_blank');
 				})
 			);
@@ -833,7 +945,7 @@ export default class FitSettingTab extends PluginSettingTab {
 				if (full === ownDataPath) {
 					statusEl.empty();
 					statusEl.className = 'fit-obsidian-path-status error';
-					statusEl.createSpan({ text: 'Contains your GitHub token — syncing requires field-level exclusion not yet available (' });
+					statusEl.createSpan({ text: 'Contains your remote provider token - syncing requires field-level exclusion not yet available (' });
 					statusEl.createEl('a', { text: 'issue #67', href: 'https://github.com/joshuakto/fit/issues/67' });
 					statusEl.createSpan({ text: ')' });
 					return false;
@@ -1093,17 +1205,18 @@ export default class FitSettingTab extends PluginSettingTab {
 		const {containerEl} = this;
 		const branch_dropdown = containerEl.querySelector('.branch-dropdown') as HTMLSelectElement;
 		const link_el = containerEl.querySelector('.link-desc') as HTMLElement;
+		const connection = this.getRemoteConnection();
+		const providerLabel = this.getProviderLabel();
 
 		if (refreshFrom === "repo(0)") {
-			// Guard: Cannot fetch from API without githubConnection
-			if (!this.plugin.githubConnection) {
-				this.plugin.logger.log('[FitSettings] Cannot refresh repos without PAT token');
+			if (!connection) {
+				this.plugin.logger.log(`[FitSettings] Cannot refresh repos without ${providerLabel} token`);
 				return;
 			}
 
 			// Fetch owners and update owner suggestions
 			try {
-				this.suggestedOwners = await this.plugin.githubConnection.getAccessibleOwners();
+				this.suggestedOwners = await connection.getAccessibleOwners();
 				if (this.ownerSuggest) {
 					this.ownerSuggest.updateSuggestions(this.suggestedOwners);
 				}
@@ -1119,7 +1232,7 @@ export default class FitSettingTab extends PluginSettingTab {
 			// Fetch repos for current owner and update repo suggestions
 			if (this.plugin.settings.owner) {
 				try {
-					this.existingRepos = await this.plugin.githubConnection.getReposForOwner(this.plugin.settings.owner);
+					this.existingRepos = await connection.getReposForOwner(this.plugin.settings.owner);
 				} catch (error) {
 					const errorMsg = error instanceof Error ? error.message : String(error);
 					this.plugin.logger.log(`[FitSettings] Could not fetch repos for owner '${this.plugin.settings.owner}': ${errorMsg}`, { error });
@@ -1134,9 +1247,8 @@ export default class FitSettingTab extends PluginSettingTab {
 		}
 
 		if (refreshFrom === "branch(1)" || refreshFrom === "repo(0)") {
-			// Guard: Cannot fetch from API without githubConnection
-			if (!this.plugin.githubConnection) {
-				this.plugin.logger.log('[FitSettings] Cannot refresh branches without PAT token');
+			if (!connection) {
+				this.plugin.logger.log(`[FitSettings] Cannot refresh branches without ${providerLabel} token`);
 				branch_dropdown.empty();
 				this.existingBranches = [];
 			} else if (this.plugin.settings.repo === "" || this.plugin.settings.owner === "") {
@@ -1144,7 +1256,7 @@ export default class FitSettingTab extends PluginSettingTab {
 				this.existingBranches = [];
 			} else {
 				try {
-					const latestBranches = await this.plugin.githubConnection.getBranches(this.plugin.settings.owner, this.plugin.settings.repo);
+					const latestBranches = await connection.getBranches(this.plugin.settings.owner, this.plugin.settings.repo);
 					if (!setEqual<string>(this.existingBranches, latestBranches)) {
 						branch_dropdown.empty();
 						this.existingBranches = latestBranches;

@@ -1502,7 +1502,7 @@ describe('FitSync', () => {
 			expect(mockNotice._calls).toEqual([
 				{ method: 'setMessage', args: ['Checking for changes...'] },
 				{ method: 'setMessage', args: [
-					"Sync failed: Bad credentials. Check your GitHub personal access token.",
+					"Sync failed: Bad credentials. Check your remote provider token.",
 					true
 				]}
 			]);

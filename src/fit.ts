@@ -1,8 +1,8 @@
 /**
  * Sync Coordinator and State Manager
  *
- * This module coordinates access to both local vault (LocalVault) and remote repository
- * (RemoteGitHubVault), and maintains sync state (cached SHAs for change detection).
+ * This module coordinates access to both local vault (LocalVault) and the selected
+ * remote repository provider, and maintains sync state (cached SHAs for change detection).
  */
 
 import { LocalStores } from "@/localStores";
@@ -11,8 +11,10 @@ import { FileChange, FileClash, FileStates, LocalClashState, compareFileStates }
 import { Vault } from "obsidian";
 import { LocalVault } from "./localVault";
 import { RemoteGitHubVault } from "./remoteGitHubVault";
+import { RemoteForgejoVault } from "./remoteForgejoVault";
 import { fitLogger } from "./logger";
 import { CommitSha } from "./util/hashing";
+import { IRemoteVault } from "./vault";
 
 // .obsidian/ paths excluded from sync regardless of obsidianSyncRules.
 // workspace files are device-specific.
@@ -35,7 +37,7 @@ export const OBSIDIAN_NEEDS_MERGE = new Set([
  *
  * Bridges two vault implementations:
  * - **LocalVault**: Obsidian vault file operations
- * - **RemoteGitHubVault**: GitHub repository operations
+ * - **RemoteVault**: Selected remote repository provider operations
  *
  * Maintains sync state for efficient change detection.
  * All vault operations throw VaultError on failure (network, auth, remote not found).
@@ -43,6 +45,7 @@ export const OBSIDIAN_NEEDS_MERGE = new Set([
  * @see FitSync - The high-level orchestrator that coordinates sync operations
  * @see LocalVault - Local Obsidian vault file operations
  * @see RemoteGitHubVault - Remote GitHub repository operations
+ * @see RemoteForgejoVault - Remote Forgejo/Gitea repository operations
  */
 export class Fit {
 	localShas: FileStates;                  // Canonical git blob SHA cache (primary, v2)
@@ -53,7 +56,7 @@ export class Fit {
 	pendingClashes: string[];               // Paths with unresolved _fit/ copies
 	obsidianSyncRules: ObsidianSyncRules;
 	localVault: LocalVault;                 // Local vault (tracks local file state)
-	remoteVault: RemoteGitHubVault;
+	remoteVault: IRemoteVault;
 	private ownDataPath: string | null = null; // e.g. ".obsidian/plugins/fit/data.json"
 
 
@@ -76,8 +79,11 @@ export class Fit {
 			obsidianSyncRules: this.obsidianSyncRules,
 		});
 
-		// Skip if no PAT - no API access possible
-		if (!setting.pat) {
+		const provider = setting.remoteProvider ?? "github";
+		const token = provider === "forgejo" ? setting.forgejoToken : setting.pat;
+
+		// Skip if no token - no API access possible
+		if (!token) {
 			return;
 		}
 
@@ -90,13 +96,24 @@ export class Fit {
 			return;
 		}
 
-		this.remoteVault = new RemoteGitHubVault(
-			setting.pat,
-			setting.owner,
-			setting.repo,
-			setting.branch,
-			setting.deviceName
-		);
+		if (provider === "forgejo") {
+			this.remoteVault = new RemoteForgejoVault(
+				setting.forgejoBaseUrl,
+				setting.forgejoToken,
+				setting.owner,
+				setting.repo,
+				setting.branch,
+				setting.deviceName
+			);
+		} else {
+			this.remoteVault = new RemoteGitHubVault(
+				setting.pat,
+				setting.owner,
+				setting.repo,
+				setting.branch,
+				setting.deviceName
+			);
+		}
 	}
 
 	/**
@@ -104,7 +121,7 @@ export class Fit {
 	 * Call this on authentication failure to allow re-creation on next attempt.
 	 */
 	clearRemoteVault() {
-		this.remoteVault = undefined as unknown as RemoteGitHubVault;
+		this.remoteVault = undefined as unknown as IRemoteVault;
 	}
 
 	loadLocalStore(localStore: LocalStores) {
@@ -145,7 +162,7 @@ export class Fit {
 	 * - `.obsidian/`: Excluded by default; individual paths may be opted in via obsidianSyncRules
 	 *
 	 * Note: This is sync policy, not a storage limitation. Both LocalVault and
-	 * RemoteGitHubVault can read/write these paths - we choose not to sync them.
+	 * Remote vaults can read/write these paths - we choose not to sync them.
 	 *
 	 * TODO: Rename to isProtectedPath() and invert logic (return true for protected paths)
 	 *
@@ -266,16 +283,16 @@ export class Fit {
 	/**
 	 * Get remote changes since last sync.
 	 *
-	 * Uses RemoteGitHubVault's internal caching - vault will only fetch from GitHub
-	 * if the latest commit SHA differs from its cached commit SHA.
+	 * Uses the remote vault's internal caching when available. The vault will only
+	 * fetch the full remote tree when the latest commit SHA differs from its cache.
 	 *
 	 * @returns Remote changes, current state, and the commit SHA of the fetched state
 	 */
 	async getRemoteChanges(): Promise<{changes: FileChange[], state: FileStates, commitSha: CommitSha}> {
-		fitLogger.log('.. ☁️ [RemoteVault] Fetching from GitHub...');
+		fitLogger.log('.. [RemoteVault] Fetching from remote...');
 		const { state, commitSha } = await this.remoteVault.readFromSource();
 		if (!commitSha) {
-			throw new Error("Expected RemoteGitHubVault to provide commitSha");
+			throw new Error("Expected remote vault to provide commitSha");
 		}
 		const changes = compareFileStates(state, this.lastFetchedRemoteShas);
 

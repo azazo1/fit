@@ -110,7 +110,7 @@ See [SHA Computation Strategy](#sha-computation-strategy) below for detailed rat
 
 This enables future syncs to compare current local SHA vs baseline to determine if the file changed locally.
 
-**CRITICAL:** Must use `LocalVault.fileSha1()` (canonical git blob SHA), NOT the raw SHA from the GitHub tree API. See [docs/architecture.md](./architecture.md) "SHA Algorithms and Change Detection".
+**CRITICAL:** Must use `LocalVault.fileSha1()` (canonical git blob SHA), NOT the raw SHA from the remote provider tree API. See [docs/architecture.md](./architecture.md) "SHA Algorithms and Change Detection".
 
 **Note:** Reading hidden files for baseline comparison requires using `vault.adapter` API instead of `vault.getAbstractFileByPath()`. See [docs/api-compatibility.md](./api-compatibility.md) "Reading Untracked Files".
 
@@ -189,7 +189,7 @@ Same logic applies for remote changes, comparing `currentRemoteTreeSha` against 
 The remote vault fetches the **current snapshot** of all files from the repository tree, not deltas. We then compare this snapshot to our cached state to detect changes.
 
 ```json
-// Simplified GitHub API response from GET /repos/{owner}/{repo}/git/trees/{sha}
+// Simplified remote provider tree API response
 {
   "tree": [
     {"path": "file1.md", "sha": "abc123", "type": "blob"},
@@ -483,7 +483,7 @@ flowchart TD
 
 2. **Phase 1 (Collect)**: Gather state from vaults in isolation
    - Local: Only tracked files (efficient Obsidian API scan), excluding active-pending paths
-   - Remote: All files (GitHub tree)
+   - Remote: All files (remote provider tree)
    - No filesystem checks yet
 
 3. **Phase 2 (Compare & Resolve)**: Determine outcomes and resolve ambiguities
@@ -771,17 +771,17 @@ FIT uses a specialized SHA computation approach during sync operations to maximi
 
 **2. Specialized Updates (During Sync)**
 - **When:** While writing remote changes to local vault
-- **Method:** Compute SHAs from in-memory content (fetched from GitHub API)
+- **Method:** Compute SHAs from in-memory content fetched from the remote provider API
 - **Purpose:** Update cache for written files only, avoiding full re-scan
 - **Implementation:** [`LocalVault.writeFile()` + `getAndClearWrittenFileShas()`](../src/localVault.ts)
 
 ### Why Compute from In-Memory Content?
 
-When files are written during sync, FIT computes their SHAs from the **in-memory content received from GitHub API**, not by re-reading files from disk. This provides three critical benefits:
+When files are written during sync, FIT computes their SHAs from the **in-memory content received from the remote provider API**, not by re-reading files from disk. This provides three critical benefits:
 
 **1. Performance - Avoids Redundant I/O**
 
-During sync, we already have the file content in memory (fetched from GitHub API). Re-reading all files from disk would:
+During sync, we already have the file content in memory from the remote provider API. Re-reading all files from disk would:
 - Double the I/O operations (write + read for each file)
 - Block the main thread with synchronous file reads
 - Significantly slow down large syncs (100+ files)
@@ -1002,7 +1002,7 @@ lastFetchedRemoteShas = {
 - Device B pushes changes before pulling A's changes
 - Commit SHAs diverge
 
-**GitHub Protection:** Branch update requires parent commit SHA
+**Remote Protection:** Branch update requires parent commit SHA
 - Second push fails with 422 error
 - Device must pull and retry
 
@@ -1201,20 +1201,20 @@ sequenceDiagram
 
 **Why serialized:**
 - Shared state updated atomically at sync completion
-- GitHub API requires parent commit SHA (concurrent pushes fail)
+- Remote provider API requires parent commit SHA or equivalent conflict protection
 - Vault writes aren't transactional
 
 **What's serialized:** Manual sync, auto-sync, overlapping attempts (double-click)
 
 **What's allowed:** User editing during sync (SHAs from in-memory content, changes detected next sync)
 
-**Multi-device:** Not prevented - GitHub handles conflicts, sync retries after pull
+**Multi-device:** Not prevented - the remote provider handles conflicting pushes, sync retries after pull
 
 ## ⚡ Performance Characteristics
 
 ### What Affects Sync Speed
 
-1. **Network latency to GitHub** (usually the bottleneck)
+1. **Network latency to the remote provider** (usually the bottleneck)
    - Cache hit (no remote changes): 1 API call
    - Cache miss (remote changed): 2 API calls
    - International networks can add significant latency

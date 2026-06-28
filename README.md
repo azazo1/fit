@@ -3,6 +3,10 @@
 
 Sync your files across mobile and desktop devices with one click.
 
+## What is this fork about
+
+- 添加了 forgejo remote 的支持, 可以添加除了 github 之外的远程仓库.
+
 ## Community project
 
 This project is a community collaboration. If you'd like to contribute please check out the [Discussions section] on GitHub to suggest or discuss ideas.
@@ -40,6 +44,10 @@ This project is a community collaboration. If you'd like to contribute please ch
 <img width="1100" alt="Screenshot of FIT settings for tokens and repos" src="https://github.com/joshuakto/fit/assets/34743132/3ab3665a-5a78-468c-a936-fcf5fd2a8774">
 
 NOTE: For security, it's recommended to limit the token scope to only the necessary repository for your vault and avoid sharing your entire plugin settings file that contains this token.
+
+### Experimental Forgejo/Gitea support
+
+Beta builds can select Forgejo/Gitea as the remote provider. Configure a base URL such as `https://git.example.com`, an API token with repository contents read/write access, then enter owner, repo, and branch manually or use provider suggestions when available. GitHub remains the default provider.
 
 ## How Sync Works
 
@@ -153,7 +161,7 @@ You should also take care with security tokens you use to ensure they don't leak
 
 **Note:** This only affected beta versions. Images and PDFs sync correctly in v1.4+.
 
-**More info:** See https://github.com/joshuakto/fit/issues/156 about the regression and older "correct format" error.
+**More info:** See <https://github.com/joshuakto/fit/issues/156> about the regression and older "correct format" error.
 
 </details>
 

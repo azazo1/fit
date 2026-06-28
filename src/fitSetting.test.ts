@@ -17,7 +17,16 @@ import FitSettingTab from './fitSettingTab';
 import { FitLogger } from './logger';
 import { findNewFields } from '@/fitSettings';
 
-const EMPTY_SETTINGS = { pat: '', avatarUrl: '', owner: '', repo: '', branch: '' };
+const EMPTY_SETTINGS = {
+	remoteProvider: 'github',
+	pat: '',
+	forgejoBaseUrl: '',
+	forgejoToken: '',
+	avatarUrl: '',
+	owner: '',
+	repo: '',
+	branch: ''
+};
 
 // Helper functions to find elements by their user-visible labels
 function findInputByLabel(container: HTMLElement, labelText: string): HTMLInputElement | null {
@@ -151,7 +160,7 @@ describe('FitSettingTab - GitHub settings', () => {
 		await settingTab.repoInfoBlock();
 
 		// Get inputs by their labels (user-visible text)
-		const patInput = findInputByLabel(settingTab.containerEl, 'Github personal access token')!;
+		const patInput = findInputByLabel(settingTab.containerEl, 'GitHub personal access token')!;
 		const ownerInput = findInputByLabel(settingTab.containerEl, 'Repository owner')!;
 		const repoInput = findInputByLabel(settingTab.containerEl, 'Repository name')!;
 
@@ -285,7 +294,8 @@ describe('FitSettingTab - GitHub settings', () => {
 	it('should generate correct GitHub link for owner/repo/branch', async () => {
 		const fakePlugin: any = {
 			githubConnection: null,
-			settings: { owner: 'bob', repo: 'project-x', branch: 'feature-123' },
+			forgejoConnection: null,
+			settings: { ...EMPTY_SETTINGS, owner: 'bob', repo: 'project-x', branch: 'feature-123' },
 			logger: mockLogger
 		};
 
@@ -293,6 +303,65 @@ describe('FitSettingTab - GitHub settings', () => {
 
 		// Verify: Link uses settings values
 		expect(settingTab.getLatestLink()).toBe('https://github.com/bob/project-x/tree/feature-123');
+	});
+
+	it('should generate correct Forgejo link for owner/repo/branch', async () => {
+		const fakePlugin: any = {
+			githubConnection: null,
+			forgejoConnection: null,
+			settings: {
+				...EMPTY_SETTINGS,
+				remoteProvider: 'forgejo',
+				forgejoBaseUrl: 'https://git.acodev.top/',
+				owner: 'bob',
+				repo: 'project-x',
+				branch: 'feature-123'
+			},
+			logger: mockLogger
+		};
+
+		const settingTab = new FitSettingTab({} as any, fakePlugin);
+
+		expect(settingTab.getLatestLink()).toBe('https://git.acodev.top/bob/project-x/src/branch/feature-123');
+	});
+
+	it('should show Forgejo authentication fields and use Forgejo connection', async () => {
+		const fakeConnection: any = {
+			getAuthenticatedUser: async () => ({ owner: 'alice', avatarUrl: '' }),
+			getAccessibleOwners: async () => ['alice'],
+			getReposForOwner: async () => ['notes'],
+			getBranches: async () => ['main']
+		};
+		const fakePlugin: any = {
+			githubConnection: null,
+			forgejoConnection: fakeConnection,
+			settings: {
+				...EMPTY_SETTINGS,
+				remoteProvider: 'forgejo',
+				forgejoBaseUrl: 'https://git.acodev.top',
+				forgejoToken: 'token'
+			},
+			saveSettings: async () => {},
+			fit: { clearRemoteVault: () => {} },
+			logger: mockLogger
+		};
+
+		const settingTab = new FitSettingTab({} as any, fakePlugin);
+
+		settingTab.githubUserInfoBlock();
+		await settingTab.repoInfoBlock();
+
+		expect(findInputByLabel(settingTab.containerEl, 'Forgejo base URL')).not.toBeNull();
+		expect(findInputByLabel(settingTab.containerEl, 'Forgejo API token')).not.toBeNull();
+
+		const authenticateButton = findButtonByText(settingTab.containerEl, 'Authenticate user')!;
+		expect(authenticateButton.disabled).toBe(false);
+		authenticateButton.click();
+		await vi.advanceTimersByTimeAsync(0);
+
+		const ownerInput = findInputByLabel(settingTab.containerEl, 'Repository owner')!;
+		expect(ownerInput.value).toBe('alice');
+		expect(fakePlugin.settings.owner).toBe('alice');
 	});
 
 	it('should clear branches when fetching fails (repo not found)', async () => {

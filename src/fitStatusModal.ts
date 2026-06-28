@@ -40,8 +40,9 @@ export class FitStatusModal extends Modal {
 		if (commitUrl) {
 			const p = contentEl.createEl('p');
 			p.createSpan({ text: 'Synced to commit ' });
-			p.createEl('a', { text: commitUrl.split('/tree/')[1]?.slice(0, 7) ?? 'remote', href: commitUrl });
-			p.createSpan({ text: ' on GitHub' });
+			const shortSha = commitUrl.split('/').filter(Boolean).pop()?.slice(0, 7) ?? 'remote';
+			p.createEl('a', { text: shortSha, href: commitUrl });
+			p.createSpan({ text: ' on remote' });
 		}
 
 		if (statusNote) {

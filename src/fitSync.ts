@@ -58,7 +58,7 @@ function logCacheUpdate(
  * Interface for the sync orchestrator.
  *
  * FitSync is the high-level coordinator for all sync operations between local
- * vault and remote GitHub repository. It's the main entry point for triggering
+ * vault and remote repository provider. It's the main entry point for triggering
  * sync and handles all the decision logic about what type of sync to perform.
  *
  * @see FitSync - The concrete implementation
@@ -1080,14 +1080,14 @@ export class FitSync implements IFitSync {
 	getSyncErrorMessage(syncError: SyncError): string {
 		let baseMessage: string;
 
-		// Handle VaultError types (thrown by LocalVault and RemoteGitHubVault)
+		// Handle VaultError types thrown by vault operations
 		if (syncError instanceof VaultError) {
 			switch (syncError.type) {
 				case 'network':
 					baseMessage = `${syncError.message}. Please check your internet connection.`;
 					break;
 				case 'authentication':
-					baseMessage = `${syncError.message}. Check your GitHub personal access token.`;
+					baseMessage = `${syncError.message}. Check your remote provider token.`;
 					break;
 				case 'remote_not_found':
 					baseMessage = `${syncError.message}. Check your repo and branch settings.`;

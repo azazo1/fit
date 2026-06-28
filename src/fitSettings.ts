@@ -12,6 +12,8 @@ export interface ObsidianSyncRule {
 // Map of .obsidian/ file path → sync rule. Paths not listed are not synced.
 export type ObsidianSyncRules = Record<string, ObsidianSyncRule>;
 
+export type RemoteProvider = "github" | "forgejo";
+
 /** True if the UI can safely read/write this rule (v1 strategies only). */
 export function isUiManaged(rule: ObsidianSyncRule): boolean {
 	return rule.sync === undefined || rule.sync === "replace";
@@ -31,8 +33,11 @@ export interface FitSettings {
 	//       | { provider: "gitea", token: string, owner: string, ... }
 	// This would allow type-safe, provider-specific settings.
 	// See RemoteVaultProvider type in src/vault.ts for provider enum.
+	remoteProvider: RemoteProvider;
 	encryptionPassword: string;
 	pat: string;
+	forgejoBaseUrl: string;
+	forgejoToken: string;
 	owner: string;       // Owner of the repo (may differ from authenticated user for contributor repos)
 	avatarUrl: string;
 	repo: string;
@@ -48,8 +53,11 @@ export interface FitSettings {
 }
 
 export const DEFAULT_SETTINGS: FitSettings = {
+	remoteProvider: "github",
 	encryptionPassword: "",
 	pat: "",
+	forgejoBaseUrl: "",
+	forgejoToken: "",
 	owner: "",
 	avatarUrl: "",
 	repo: "",

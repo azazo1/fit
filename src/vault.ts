@@ -3,12 +3,13 @@
  *
  * Core abstractions for vault operations (read/write) across different storage backends.
  * A "vault" represents a complete collection of synced files, whether stored locally
- * (Obsidian vault) or remotely (GitHub repository, GitLab, etc.).
+ * (Obsidian vault) or remotely (GitHub, Forgejo/Gitea, GitLab, etc.).
  */
 
 import { FileChange, FileStates } from "./util/changeTracking";
 import { FileContent } from "./util/contentEncoding";
 import { CommitSha, TreeSha } from "./util/hashing";
+import { LocalStores } from "./localStores";
 
 /** Discriminated return types for readFromSource() based on vault category */
 type VaultReadResultMap = {
@@ -27,7 +28,7 @@ type VaultReadResultMap = {
 /**
  * Result of reading vault state, including vault-specific metadata.
  *
- * For RemoteGitHubVault: Includes the commit SHA of the fetched state
+ * For remote vaults: Includes the commit SHA of the fetched state
  * For LocalVault: May be extended in future for other metadata
  */
 export type VaultReadResult<T extends VaultCategory = VaultCategory> = VaultReadResultMap[T];
@@ -142,7 +143,7 @@ export class VaultError extends Error {
  * ```typescript
  * // Initialize vaults with cached state from persisted storage
  * const localVault = new LocalVault(obsidianVault, cachedLocalState);
- * const remoteVault = new RemoteGitHubVault(octokit, cachedRemoteState);
+ * const remoteVault = new RemoteGitHubVault(token, owner, repo, branch, deviceName);
  *
  * // Detect changes (typically in pre-sync checks)
  * const currentLocal = await localVault.readFromSource();
@@ -168,16 +169,16 @@ export interface IVault<T extends VaultCategory> {
 	 * Scan source and return the current scanned state with vault-specific metadata.
 	 *
 	 * For LocalVault: Scans all files in Obsidian vault
-	 * For RemoteGitHubVault: Fetches tree from GitHub API and includes commit SHA
+	 * For remote vaults: Fetches tree from the provider API and includes commit SHA
 	 *
 	 * @returns The scanned state and vault-specific metadata
 	 */
-	readFromSource(): Promise<VaultReadResult<T>>;
+	readFromSource(ignoreCache?: boolean): Promise<VaultReadResult<T>>;
 
 	/**
 	 * Read file content for a specific path
 	 *
-	 * For RemoteGitHubVault, returns content as of last readFromSource() for performance (does NOT force fresh remote fetch).
+	 * For remote vaults, returns content as of last readFromSource() for performance (does NOT force fresh remote fetch).
 	 *
 	 * Callers can use FileContent's toBase64() or toPlainText() helpers to get the content
 	 * in the desired format without worrying about the source encoding.
@@ -197,7 +198,7 @@ export interface IVault<T extends VaultCategory> {
 	 *   - Returns newBaselineStates for efficient state updates
 	 *   - Clash files written to _fit/ subdirectory, SHA computed for original path
 	 *
-	 * For RemoteGitHubVault: Creates a single commit with all changes
+	 * For remote vaults: Creates one or more commits with all changes
 	 *   - Uses FileContent's existing encoding (plaintext or base64)
 	 *   - Returns new commitSha and treeSha
 	 *   - Ignores clashPaths (remote doesn't have _fit/ concept)
@@ -229,11 +230,18 @@ export interface IVault<T extends VaultCategory> {
 	 *
 	 * Example: _fit/ directory
 	 * - LocalVault.shouldTrackState('_fit/file.md') → true (can read it)
-	 * - RemoteGitHubVault.shouldTrackState('_fit/file.md') → true (can read it)
+	 * - Remote vault shouldTrackState('_fit/file.md') returns true (can read it)
 	 * - Fit.shouldSyncPath('_fit/file.md') → false (shouldn't sync it)
 	 *
 	 * @param path - File path to check
 	 * @returns true if this vault implementation can reliably track the path
 	 */
 	shouldTrackState(path: string): boolean;
+}
+
+export interface IRemoteVault extends IVault<"remote"> {
+	clear(): Promise<LocalStores | null>;
+	getOwner(): string;
+	getRepo(): string;
+	getBranch(): string;
 }
