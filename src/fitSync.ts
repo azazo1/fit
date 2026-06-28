@@ -54,6 +54,40 @@ function logCacheUpdate(
 	}
 }
 
+function dropAlreadySyncedChanges(
+	localChanges: FileChange[],
+	remoteChanges: FileChange[],
+	currentLocalState: FileStates,
+	remoteTreeSha: FileStates
+): { localChanges: FileChange[]; remoteChanges: FileChange[]; alreadySynced: FileStates } {
+	const alreadySynced: FileStates = {};
+	const alreadyGone = new Set<string>();
+	const remoteChangesByPath = new Map(remoteChanges.map(change => [change.path, change]));
+
+	for (const localChange of localChanges) {
+		const remoteChange = remoteChangesByPath.get(localChange.path);
+		if (!remoteChange) continue;
+		const localSha = currentLocalState[localChange.path];
+		const remoteSha = remoteTreeSha[localChange.path];
+		if (localSha && remoteSha && localSha === remoteSha) {
+			alreadySynced[localChange.path] = localSha;
+		} else if (!localSha && !remoteSha && localChange.type === "REMOVED" && remoteChange.type === "REMOVED") {
+			alreadyGone.add(localChange.path);
+		}
+	}
+
+	if (Object.keys(alreadySynced).length === 0 && alreadyGone.size === 0) {
+		return { localChanges, remoteChanges, alreadySynced };
+	}
+
+	const shouldDrop = (path: string) => alreadySynced[path] !== undefined || alreadyGone.has(path);
+	return {
+		localChanges: localChanges.filter(change => !shouldDrop(change.path)),
+		remoteChanges: remoteChanges.filter(change => !shouldDrop(change.path)),
+		alreadySynced,
+	};
+}
+
 /**
  * Interface for the sync orchestrator.
  *
@@ -439,6 +473,7 @@ export class FitSync implements IFitSync {
 		safeLocal: FileChange[],
 		safeRemote: FileChange[],
 		clashes: FileClash[],
+		alreadySynced: FileStates,
 		pendingReminderPaths: Set<string>,
 		existenceMap: Map<string, "file" | "folder" | "nonexistent">,
 		syncNotice: FitNotice
@@ -568,6 +603,7 @@ export class FitSync implements IFitSync {
 		// Update local state: start with current state, apply writes, remove deletes
 		const newLocalState = {
 			...currentLocalState, // Start with state from beginning of sync (includes all existing files)
+			...alreadySynced,
 			...newBaselineShas // Update SHAs for all files written (non-clashed + clashes) (#169)
 		};
 
@@ -704,7 +740,7 @@ export class FitSync implements IFitSync {
 
 			// Both succeeded, extract values
 			const {changes: localChanges, state: currentLocalState} = localResult.value;
-			const {changes: remoteChanges, state: remoteTreeSha, commitSha: remoteCommitSha} = remoteResult.value;
+			let {changes: remoteChanges, state: remoteTreeSha, commitSha: remoteCommitSha} = remoteResult.value;
 			fitLogger.log('.. ✅ [Sync] Change detection complete');
 
 			// Phase 0: Resolve pending clashes
@@ -814,9 +850,23 @@ export class FitSync implements IFitSync {
 					.filter(c => !resolvedNoChangePaths.has(c.path)),
 				...pendingDeletions.map(path => ({ path, type: 'REMOVED' as const })),
 			];
+			const alreadySyncedResult = dropAlreadySyncedChanges(
+				filteredLocalChanges,
+				remoteChanges,
+				currentLocalState,
+				remoteTreeSha
+			);
+			const normalizedLocalChanges = alreadySyncedResult.localChanges;
+			remoteChanges = alreadySyncedResult.remoteChanges;
+			if (Object.keys(alreadySyncedResult.alreadySynced).length > 0) {
+				fitLogger.log('[FitSync] Skipping already-synced changes', {
+					count: Object.keys(alreadySyncedResult.alreadySynced).length,
+					paths: Object.keys(alreadySyncedResult.alreadySynced)
+				});
+			}
 
 			// Log detected changes for diagnostics
-			const localCount = filteredLocalChanges.length;
+			const localCount = normalizedLocalChanges.length;
 			const remoteCount = remoteChanges.length;
 
 			if (localCount > 0 || remoteCount > 0) {
@@ -825,7 +875,7 @@ export class FitSync implements IFitSync {
 				if (localCount > 0) {
 					const localData: Record<string, string[]> = {};
 					['ADDED', 'MODIFIED', 'REMOVED'].forEach(changeType => {
-						const files = filteredLocalChanges.filter(c => c.type === changeType).map(c => c.path);
+						const files = normalizedLocalChanges.filter(c => c.type === changeType).map(c => c.path);
 						if (files.length > 0) localData[changeType] = files;
 					});
 					logData.local = localData;
@@ -847,7 +897,7 @@ export class FitSync implements IFitSync {
 			const localScanPaths = new Set(Object.keys(currentLocalState));
 			const remoteScanPaths = new Set(Object.keys(remoteTreeSha));
 			const { safeLocal, safeRemote: initialSafeRemote, clashes: initialClashes, existenceMap } = await this.compareAndResolveChanges(
-				filteredLocalChanges,
+				normalizedLocalChanges,
 				remoteChanges,
 				localScanPaths,
 				remoteScanPaths
@@ -890,6 +940,7 @@ export class FitSync implements IFitSync {
 				safeLocal,
 				safeRemote,
 				clashes,
+				alreadySyncedResult.alreadySynced,
 				pendingReminderPaths,
 				existenceMap,
 				syncNotice

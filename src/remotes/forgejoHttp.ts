@@ -41,12 +41,21 @@ export async function forgejoRequest<T>(
 function throwResponseError(response: RequestUrlResponse, notFoundMessage: string): never {
 	const message = readErrorMessage(response);
 	if (response.status === 401 || response.status === 403) {
-		throw VaultError.authentication(message || "Authentication failed. Check your Forgejo token.");
+		throw VaultError.authentication(
+			message || "Authentication failed. Check your Forgejo token.",
+			{ originalError: { status: response.status, message } }
+		);
 	}
 	if (response.status === 404) {
-		throw VaultError.remoteNotFound(message || notFoundMessage);
+		throw VaultError.remoteNotFound(
+			message || notFoundMessage,
+			{ originalError: { status: response.status, message } }
+		);
 	}
-	throw VaultError.network(message || `Forgejo API request failed with status ${response.status}`);
+	throw VaultError.network(
+		message || `Forgejo API request failed with status ${response.status}`,
+		{ originalError: { status: response.status, message } }
+	);
 }
 
 function readErrorMessage(response: RequestUrlResponse): string {

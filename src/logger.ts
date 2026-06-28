@@ -12,6 +12,18 @@ import { Vault } from "obsidian";
  * accidentally logging large content (e.g., base64 file data in API errors).
  */
 export const MAX_LOG_STRING_LENGTH = 2000;
+export const MAX_LOG_ARRAY_ITEMS = 20;
+const PATH_ARRAY_LOG_KEYS = new Set([
+	"paths",
+	"failedPaths",
+	"skippedPaths",
+	"rateLimitedPaths",
+	"remainingUnpushed",
+	"pendingClashes",
+	"ADDED",
+	"MODIFIED",
+	"REMOVED",
+]);
 
 /**
  * Minimal filesystem interface for a single log file.
@@ -52,7 +64,7 @@ export interface LoggerConfig {
  * - Truncates large request.body/response.data fields with size info and preview
  * - Recursively processes nested objects/arrays
  */
-function sanitizeForLogging(data: unknown, depth = 0): unknown {
+function sanitizeForLogging(data: unknown, depth = 0, keyHint?: string): unknown {
 	// Prevent infinite recursion on deeply nested structures
 	if (depth > 10) {
 		return '[nested too deep]';
@@ -74,6 +86,19 @@ function sanitizeForLogging(data: unknown, depth = 0): unknown {
 	}
 
 	if (Array.isArray(data)) {
+		if (keyHint && PATH_ARRAY_LOG_KEYS.has(keyHint) && data.every(item => typeof item === "string")) {
+			return {
+				count: data.length,
+				omitted: "path list omitted",
+			};
+		}
+		if (data.length > MAX_LOG_ARRAY_ITEMS) {
+			return {
+				count: data.length,
+				sample: data.slice(0, MAX_LOG_ARRAY_ITEMS).map(item => sanitizeForLogging(item, depth + 1)),
+				omitted: data.length - MAX_LOG_ARRAY_ITEMS,
+			};
+		}
 		return data.map(item => sanitizeForLogging(item, depth + 1));
 	}
 
@@ -110,7 +135,7 @@ function sanitizeForLogging(data: unknown, depth = 0): unknown {
 			}
 		}
 
-		result[key] = sanitizeForLogging(value, depth + 1);
+		result[key] = sanitizeForLogging(value, depth + 1, key);
 	}
 	return result;
 }
@@ -144,15 +169,17 @@ export class Logger {
 	logUnsafe(tag: string, data?: unknown): void {
 		const timestamp = new Date().toISOString();
 		let message: string;
+		let sanitizedData: unknown;
 
 		if (data !== undefined) {
 			try {
 				// Sanitize data to prevent large content from corrupting log file
-				const sanitized = sanitizeForLogging(data);
-				message = `[${timestamp}] ${tag}: ${JSON.stringify(sanitized, null, 2)}`;
+				sanitizedData = sanitizeForLogging(data);
+				message = `[${timestamp}] ${tag}: ${JSON.stringify(sanitizedData, null, 2)}`;
 			} catch (e) {
 				// Handle circular refs, BigInt, etc.
-				message = `[${timestamp}] ${tag}: [Unserializable data: ${e instanceof Error ? e.message : String(e)}]`;
+				sanitizedData = `[Unserializable data: ${e instanceof Error ? e.message : String(e)}]`;
+				message = `[${timestamp}] ${tag}: ${sanitizedData}`;
 			}
 		} else {
 			message = `[${timestamp}] ${tag}`;
@@ -161,7 +188,7 @@ export class Logger {
 		// Always log to console for desktop users (defensive)
 		try {
 			if (data !== undefined) {
-				console.log(tag, data);
+				console.log(tag, sanitizedData);
 			} else {
 				console.log(tag);
 			}

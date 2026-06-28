@@ -57,6 +57,11 @@ type ForgejoFileChangeResponse = {
 	};
 };
 
+type ForgejoContentsResponse = {
+	sha?: string;
+	type?: string;
+};
+
 export class RemoteForgejoVault implements IRemoteVault {
 	private baseUrl: string;
 	private token: string;
@@ -171,16 +176,8 @@ export class RemoteForgejoVault implements IRemoteVault {
 			const remotePath = await this.toRemotePath(path);
 			const fileContent = await this.toRemoteContent(content);
 			const existed = currentState[path] !== undefined;
-			const response = await this.request<ForgejoFileChangeResponse>(
-				existed ? "PUT" : "POST",
-				`/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/contents/${encodePath(remotePath)}`,
-				{
-					branch: this.branch,
-					content: fileContent,
-					message: this.commitMessage(),
-					...(existed && { sha: currentState[path] }),
-				}
-			);
+			const contentPath = `/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/contents/${encodePath(remotePath)}`;
+			const response = await this.writeContent(path, contentPath, fileContent, currentState[path]);
 			latestCommitSha = this.extractCommitSha(response) ?? latestCommitSha;
 			changes.push({ path, type: existed ? "MODIFIED" : "ADDED" });
 		}
@@ -322,6 +319,59 @@ export class RemoteForgejoVault implements IRemoteVault {
 		return sha ? sha as CommitSha : null;
 	}
 
+	private async writeContent(
+		path: string,
+		contentPath: string,
+		fileContent: string,
+		knownSha?: string
+	): Promise<ForgejoFileChangeResponse> {
+		try {
+			return await this.request<ForgejoFileChangeResponse>(
+				knownSha ? "PUT" : "POST",
+				contentPath,
+				{
+					branch: this.branch,
+					content: fileContent,
+					message: this.commitMessage(),
+					...(knownSha && { sha: knownSha }),
+				}
+			);
+		} catch (error) {
+			if (!isForgejoFileExistsError(error) || knownSha) {
+				throw error;
+			}
+
+			const fresh = await this.readFromSource(true);
+			const freshSha = fresh.state[path] ?? await this.readExistingContentSha(contentPath);
+			if (!freshSha) {
+				throw error;
+			}
+
+			return await this.request<ForgejoFileChangeResponse>(
+				"PUT",
+				contentPath,
+				{
+					branch: this.branch,
+					content: fileContent,
+					message: this.commitMessage(),
+					sha: freshSha,
+				}
+			);
+		}
+	}
+
+	private async readExistingContentSha(contentPath: string): Promise<string | null> {
+		try {
+			const response = await this.request<ForgejoContentsResponse>("GET", contentPath);
+			if (response.type && response.type !== "file") {
+				return null;
+			}
+			return response.sha ?? null;
+		} catch {
+			return null;
+		}
+	}
+
 	private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
 		return forgejoRequest<T>(
 			this.baseUrl,
@@ -336,4 +386,10 @@ export class RemoteForgejoVault implements IRemoteVault {
 
 function encodePath(path: string): string {
 	return path.split("/").map(encodeURIComponent).join("/");
+}
+
+function isForgejoFileExistsError(error: unknown): boolean {
+	return error instanceof VaultError &&
+		error.type === "network" &&
+		/repository file already exists|file already exists/i.test(error.message);
 }

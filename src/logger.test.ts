@@ -495,6 +495,45 @@ describe('Logger', () => {
 			expect(content).not.toContain('X'.repeat(1000));
 		});
 
+		it('should omit path arrays from log files and console output', async () => {
+			const adapter = createMockAdapter();
+			const logger = new Logger({
+				adapter,
+				maxLogSize: 100000
+			});
+			const paths = Array.from({ length: 100 }, (_, i) => `folder/private-${i}.md`);
+
+			logger.log('paths', { paths });
+			await logger.flush();
+
+			const content = adapter.content!;
+			expect(content).toContain('"count": 100');
+			expect(content).toContain('"omitted": "path list omitted"');
+			expect(content).not.toContain('folder/private-0.md');
+			expect(console.log).toHaveBeenCalledWith('paths', {
+				paths: {
+					count: 100,
+					omitted: 'path list omitted'
+				}
+			});
+		});
+
+		it('should sample generic large arrays', async () => {
+			const adapter = createMockAdapter();
+			const logger = new Logger({
+				adapter,
+				maxLogSize: 100000
+			});
+
+			logger.log('large-array', { values: Array.from({ length: 25 }, (_, i) => i) });
+			await logger.flush();
+
+			const content = adapter.content!;
+			expect(content).toContain('"count": 25');
+			expect(content).toContain('"omitted": 5');
+			expect(content).toContain('"sample"');
+		});
+
 		it('should preserve small body/data from API-like objects', async () => {
 			const adapter = createMockAdapter();
 			const logger = new Logger({

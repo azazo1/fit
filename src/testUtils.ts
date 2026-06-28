@@ -827,7 +827,7 @@ export class FakeRemoteVault implements IVault<"remote"> {
 		}
 		this.files.set(path, fileContent);
 		// Store blob SHA -> content mapping for readFileContent
-		const sha = await computeSha1(path + fileContent.toBase64()) as BlobSha;
+		const sha = await LocalVault.fileSha1(path, fileContent);
 		this.blobShas.set(sha, fileContent.toBase64());
 	}
 
@@ -886,7 +886,7 @@ export class FakeRemoteVault implements IVault<"remote"> {
 		for (const [path, content] of this.files.entries()) {
 			if (this.shouldTrackState(path)) {
 				const base64Content = content.toBase64();
-				const sha = await computeSha1(path + base64Content) as BlobSha;
+				const sha = await LocalVault.fileSha1(path, content);
 				state[path] = sha;
 				// Store blob SHA -> content mapping for readFileContent if requested
 				if (storeBlobShaMapping) {

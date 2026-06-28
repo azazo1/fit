@@ -212,6 +212,58 @@ describe('FitSync', () => {
 		fitLoggerFlushSpy.mockRestore();
 	});
 
+	it('should adopt matching local and remote changes when caches are stale', async () => {
+		const fitSync = createFitSync();
+		localVault.setFile('same.md', 'same content');
+		remoteVault.setFile('same.md', 'same content');
+		localVault.setFile('modified-same.md', 'same changed content');
+		remoteVault.setFile('modified-same.md', 'same changed content');
+		localVault.setFile('local-only.md', 'local only');
+		remoteVault.setFile('remote-only.md', 'remote only');
+		localStoreState.localShas = {
+			'modified-same.md': 'old-local-sha' as BlobSha,
+		};
+		localStoreState.lastFetchedRemoteShas = {
+			'modified-same.md': 'old-remote-sha' as BlobSha,
+		};
+		fitSync.fit.loadLocalStore(localStoreState);
+
+		const result = await syncAndHandleResult(fitSync, createMockNotice());
+
+		expect(result).toMatchObject({
+			success: true,
+			clash: []
+		});
+		expect(remoteVault.getAllFilesAsRaw()).toMatchObject({
+			'same.md': 'same content',
+			'modified-same.md': 'same changed content',
+			'local-only.md': 'local only',
+			'remote-only.md': 'remote only',
+		});
+		expect(localVault.getAllFilesAsRaw()).toMatchObject({
+			'same.md': 'same content',
+			'modified-same.md': 'same changed content',
+			'local-only.md': 'local only',
+			'remote-only.md': 'remote only',
+		});
+		expect(localStoreState.localShas).toEqual({
+			'same.md': expect.any(String),
+			'modified-same.md': expect.any(String),
+			'local-only.md': expect.any(String),
+			'remote-only.md': expect.any(String),
+		});
+		expect(localStoreState.lastFetchedRemoteShas).toEqual({
+			'same.md': expect.any(String),
+			'modified-same.md': expect.any(String),
+			'local-only.md': expect.any(String),
+			'remote-only.md': expect.any(String),
+		});
+		expect(fitLoggerLogSpy).toHaveBeenCalledWith(
+			'[FitSync] Skipping already-synced changes',
+			expect.objectContaining({ count: 2 })
+		);
+	});
+
 	it('should only sync accumulated changes after failed sync, not report stale changes', async () => {
 		// === SETUP: Initial synced state (empty vault) ===
 		const fitSync = createFitSync();

@@ -42,6 +42,8 @@ function installForgejoFetchMock() {
 	let commitIndex = 1;
 	let currentCommit = "commit-1";
 	let currentTree = "tree-1";
+	let simulateAlreadyExistsForPath: string | null = null;
+	let hideAlreadyExistsPathFromTree = false;
 	let state = new Map<string, string>([
 		["notes/a.md", "sha-a"],
 	]);
@@ -70,11 +72,21 @@ function installForgejoFetchMock() {
 			return jsonResponse(200, {
 				sha: currentTree,
 				tree: [
-					...Array.from(state.entries()).map(([path, sha]) => ({ path, type: "blob", sha })),
+					...Array.from(state.entries())
+						.filter(([path]) => !(hideAlreadyExistsPathFromTree && path === "notes/race.md"))
+						.map(([path, sha]) => ({ path, type: "blob", sha })),
 					{ path: "notes", type: "tree", sha: "tree-dir" },
 					{ path: "submodule", type: "commit", sha: "commit-sub" },
 				],
 			});
+		}
+
+		if (method === "GET" && apiPath.startsWith(`/repos/${OWNER}/${REPO}/contents/`)) {
+			const path = decodeURIComponent(apiPath.replace(`/repos/${OWNER}/${REPO}/contents/`, ""));
+			const sha = state.get(path);
+			return sha
+				? jsonResponse(200, { type: "file", sha })
+				: jsonResponse(404, { message: "file not found" });
 		}
 
 		if (method === "GET" && apiPath.startsWith(`/repos/${OWNER}/${REPO}/git/blobs/`)) {
@@ -87,6 +99,15 @@ function installForgejoFetchMock() {
 
 		if ((method === "POST" || method === "PUT") && apiPath.startsWith(`/repos/${OWNER}/${REPO}/contents/`)) {
 			const path = decodeURIComponent(apiPath.replace(`/repos/${OWNER}/${REPO}/contents/`, ""));
+			if (method === "POST" && simulateAlreadyExistsForPath === path) {
+				state.set(path, `remote-${path}-sha`);
+				blobs.set(`remote-${path}-sha`, "cmVtb3Rl");
+				commitIndex += 1;
+				currentCommit = `commit-${commitIndex}`;
+				currentTree = `tree-${commitIndex}`;
+				simulateAlreadyExistsForPath = null;
+				return jsonResponse(422, { message: `repository file already exists [path: ${path}]` });
+			}
 			const nextSha = `${path}-sha-${commitIndex + 1}`;
 			state.set(path, nextSha);
 			blobs.set(nextSha, body.content);
@@ -108,7 +129,18 @@ function installForgejoFetchMock() {
 		return jsonResponse(500, { message: `Unhandled ${method} ${apiPath}` });
 	}) as any);
 
-	return { requests, requestUrlMock, state, blobs };
+	return {
+		requests,
+		requestUrlMock,
+		state,
+		blobs,
+		simulateAlreadyExists(path: string) {
+			simulateAlreadyExistsForPath = path;
+		},
+		hideAlreadyExistsPathFromTree() {
+			hideAlreadyExistsPathFromTree = true;
+		},
+	};
 }
 
 describe("RemoteForgejoVault", () => {
@@ -184,5 +216,41 @@ describe("RemoteForgejoVault", () => {
 		expect(result.treeSha).toBe("tree-1");
 		expect(result.newState).toEqual({ "notes/a.md": "sha-a" });
 		expect(requests.every(r => r.method === "GET")).toBe(true);
+	});
+
+	it("retries create as update when Forgejo reports file already exists", async () => {
+		const forgejo = installForgejoFetchMock();
+		forgejo.simulateAlreadyExists("notes/race.md");
+		const vault = makeVault();
+
+		const result = await vault.applyChanges(
+			[{ path: "notes/race.md", content: FileContent.fromPlainText("local") }],
+			[]
+		);
+
+		expect(result.changes).toEqual([
+			{ path: "notes/race.md", type: "ADDED" },
+		]);
+		expect(forgejo.requests.some(r => r.method === "POST" && r.url.endsWith("/contents/notes/race.md"))).toBe(true);
+		expect(forgejo.requests.some(r => r.method === "PUT" && r.url.endsWith("/contents/notes/race.md"))).toBe(true);
+		expect(result.newState["notes/race.md"]).toBe("notes/race.md-sha-3");
+	});
+
+	it("uses contents API fallback when tree refresh misses an existing file", async () => {
+		const forgejo = installForgejoFetchMock();
+		forgejo.simulateAlreadyExists("notes/race.md");
+		forgejo.hideAlreadyExistsPathFromTree();
+		const vault = makeVault();
+
+		const result = await vault.applyChanges(
+			[{ path: "notes/race.md", content: FileContent.fromPlainText("local") }],
+			[]
+		);
+
+		expect(forgejo.requests.some(r => r.method === "GET" && r.url.endsWith("/contents/notes/race.md"))).toBe(true);
+		expect(forgejo.requests.some(r => r.method === "PUT" && r.url.endsWith("/contents/notes/race.md"))).toBe(true);
+		expect(result.changes).toEqual([
+			{ path: "notes/race.md", type: "ADDED" },
+		]);
 	});
 });
