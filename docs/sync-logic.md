@@ -242,6 +242,17 @@ currentLocalSha = {}  // File doesn't exist
 
 FIT implements three layers of path filtering:
 
+### Path Filter Modes
+
+`FitSettings.pathFilterMode` controls how strict FIT's local sync policy is:
+
+- `fit` is the default safety mode. It keeps FIT's existing protected-path behavior, including opt-in `.obsidian/` sync through `obsidianSyncRules`.
+- `git` is Git-compatible path mode. It follows local `.gitignore` visibility for ordinary vault paths, syncs `.obsidian/` files directly, and disables the extra Obsidian config and hidden-file toggles in settings.
+
+Both modes still hard-exclude `_fit/`, any `.git/` directory component, nested Git worktrees or submodules, and FIT's own plugin `data.json`.
+
+The implementation does not call the system `git` CLI, because the plugin must run on Obsidian mobile. Instead, `LocalVault` combines Obsidian's vault index, adapter path scanning, and `GitignoreFilter`.
+
 ### 1. Protected Paths (`shouldSyncPath`) - Default Excluded
 
 - **Filtered by:** `Fit.shouldSyncPath()`
@@ -252,7 +263,10 @@ FIT implements three layers of path filtering:
 - `.obsidian/workspace.json`, `.obsidian/workspace-mobile.json` — device-specific layout
 - `.obsidian/community-plugins.json`, `.obsidian/core-plugins.json` — need array-merge logic (v2)
 - `<pluginDir>/data.json` (e.g. `plugins/fit/data.json`) — contains PAT; needs field-level exclusion (v2)
+- Any `.git/` directory component — Git internals must never be synced through provider APIs
 - `_fit/` — conflict resolution directory
+
+In Git-compatible path mode, `.obsidian/` is no longer protected as a whole. The always-excluded entries above still apply.
 
 **Opt-in `.obsidian/` paths (`obsidianSyncRules`):**
 Individual `.obsidian/` files can be synced by adding an entry to `FitSettings.obsidianSyncRules`:
@@ -260,7 +274,7 @@ Individual `.obsidian/` files can be synced by adding an entry to `FitSettings.o
 // Opt in appearance.json for replace-strategy sync:
 obsidianSyncRules: { ".obsidian/appearance.json": {} }
 ```
-Paths not in `obsidianSyncRules` (or in the always-excluded set) remain blocked.
+Paths not in `obsidianSyncRules` (or in the always-excluded set) remain blocked in FIT safety mode.
 
 **Behavior for blocked paths:**
 - **⬆️ Local→Remote:** Never pushed
@@ -297,6 +311,8 @@ if (!this.fit.shouldSyncPath(".obsidian/app.json")) {
 
 **Hidden files:** Any path component starting with `.` (e.g., `.gitignore`, `.env`)
 
+Git internals are a special case: `.gitignore` is a normal hidden file, but any path inside a `.git/` directory is always excluded before SHA computation.
+
 **When `syncHiddenFiles = true` (default):**
 - Local vault performs a full recursive `adapter.list` scan on each sync to discover hidden paths (Obsidian's `vault.getFiles()` omits them)
 - Hidden files read via `vault.adapter.readBinary()` and tracked in `localShas` like any other file
@@ -307,6 +323,11 @@ if (!this.fit.shouldSyncPath(".obsidian/app.json")) {
 - Hidden paths excluded from `localShas` (can't reliably scan via Vault API)
 - Remote hidden files saved to `_fit/` for safety (can't verify local state)
 - Local hidden files never pushed
+
+**When `pathFilterMode = "git"`:**
+- Hidden paths are discovered with the adapter scan even if `syncHiddenFiles = false`
+- The `syncHiddenFiles` toggle is ignored and disabled in settings
+- Hidden paths are still filtered by `.gitignore`, `.git/`, `_fit/`, nested Git roots, and FIT's own data path
 
 **Note:** `shouldTrackState` controls LocalVault's scanning capability. Sync policy decisions (e.g. never push `.obsidian/`) are handled separately by `Fit.shouldSyncPath()`.
 
@@ -325,6 +346,7 @@ if (!this.fit.shouldSyncPath(".obsidian/app.json")) {
 - Files matched by any applicable `.gitignore` are excluded from `localShas` and never pushed
 - Patterns scope correctly: a `build/.gitignore` only affects files under `build/`
 - If no `.gitignore` files exist, this layer is a no-op
+- Nested Git worktrees and submodules are treated as separate repositories and skipped instead of being flattened into the parent vault state
 
 **Example:**
 ```
@@ -340,7 +362,7 @@ node_modules/
 
 ### Combined Filtering: `.obsidian/` Files
 
-By default, `.obsidian/` files are excluded by `shouldSyncPath` regardless of `syncHiddenFiles`.
+In FIT safety mode, `.obsidian/` files are excluded by `shouldSyncPath` regardless of `syncHiddenFiles`.
 When a path is opted in via `obsidianSyncRules`, two additional rules apply:
 
 - `shouldTrackState` returns `true` for opted-in `.obsidian/` paths even when `syncHiddenFiles = false`,
@@ -355,6 +377,8 @@ When a path is opted in via `obsidianSyncRules`, two additional rules apply:
 **Result for opted-in `.obsidian/` paths:**
 - Tracked in `localShas` and synced bidirectionally like any regular file
 - `syncHiddenFiles = false` does not suppress them (explicit opt-in overrides the hidden-file default)
+
+In Git-compatible path mode, ordinary `.obsidian/` files are synced directly according to `.gitignore` visibility. FIT's own plugin `data.json` remains excluded.
 
 ### Implementation Locations
 

@@ -6,7 +6,7 @@
  */
 
 import { LocalStores } from "@/localStores";
-import { FitSettings, ObsidianSyncRules } from "@/fitSettings";
+import { FitSettings, ObsidianSyncRules, PathFilterMode } from "@/fitSettings";
 import { FileChange, FileClash, FileStates, LocalClashState, compareFileStates } from "./util/changeTracking";
 import { Vault } from "obsidian";
 import { LocalVault } from "./localVault";
@@ -15,6 +15,7 @@ import { RemoteForgejoVault } from "./remoteForgejoVault";
 import { fitLogger } from "./logger";
 import { CommitSha } from "./util/hashing";
 import { IRemoteVault } from "./vault";
+import { isGitInternalPath } from "./util/gitPath";
 
 // .obsidian/ paths excluded from sync regardless of obsidianSyncRules.
 // workspace files are device-specific.
@@ -55,9 +56,10 @@ export class Fit {
 	unpushedFiles: FileStates;              // Files skipped due to API size limit (422)
 	pendingClashes: string[];               // Paths with unresolved _fit/ copies
 	obsidianSyncRules: ObsidianSyncRules;
+	pathFilterMode: PathFilterMode = "fit";
 	localVault: LocalVault;                 // Local vault (tracks local file state)
 	remoteVault: IRemoteVault;
-	private ownDataPath: string | null = null; // e.g. ".obsidian/plugins/fit/data.json"
+	private ownDataPath: string | null = ".obsidian/plugins/fit/data.json";
 
 
 	constructor(setting: FitSettings, localStores: LocalStores, vault: Vault, pluginDir?: string) {
@@ -74,9 +76,11 @@ export class Fit {
 
 		// Apply local vault settings unconditionally (don't require PAT)
 		this.obsidianSyncRules = setting.obsidianSyncRules ?? {};
+		this.pathFilterMode = setting.pathFilterMode ?? "fit";
 		this.localVault.configure({
 			syncHiddenFiles: setting.syncHiddenFiles,
 			obsidianSyncRules: this.obsidianSyncRules,
+			pathFilterMode: this.pathFilterMode,
 		});
 
 		const provider = setting.remoteProvider ?? "github";
@@ -170,17 +174,22 @@ export class Fit {
 	 * @returns true if path should be included in sync
 	 */
 	shouldSyncPath(path: string): boolean {
+		if (isGitInternalPath(path)) {
+			return false;
+		}
+
 		// Exclude _fit/ directory (conflict resolution area)
 		if (path.startsWith("_fit/")) {
 			return false;
 		}
 
-		if (path.startsWith(".obsidian/")) {
+		// Block own data.json dynamically in every path mode because it can contain tokens.
+		if (this.ownDataPath && path === this.ownDataPath) return false;
+
+		if (path.startsWith(".obsidian/") && this.pathFilterMode !== "git") {
 			// Always-excluded regardless of user rules
 			if (OBSIDIAN_ALWAYS_EXCLUDED.has(path)) return false;
 			if (OBSIDIAN_NEEDS_MERGE.has(path)) return false;
-			// Block own data.json dynamically — covers symlinked/alternate install dirs
-			if (this.ownDataPath && path === this.ownDataPath) return false;
 
 			const rule = this.obsidianSyncRules?.[path];
 			if (!rule) return false;
@@ -277,6 +286,15 @@ export class Fit {
 			}
 		}
 		const changes = compareFileStates(trackableCurrentState, trackableLocalShas);
+		fitLogger.log('[Fit] Local sync candidates evaluated', {
+			scannedFiles: Object.keys(currentState).length,
+			syncCandidates: Object.keys(trackableCurrentState).length,
+			baselineCandidates: Object.keys(trackableLocalShas).length,
+			ADDED: changes.filter(c => c.type === 'ADDED').length,
+			MODIFIED: changes.filter(c => c.type === 'MODIFIED').length,
+			REMOVED: changes.filter(c => c.type === 'REMOVED').length,
+			total: changes.length,
+		});
 		return { changes, state: currentState };
 	}
 

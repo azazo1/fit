@@ -68,6 +68,7 @@ describe('FitPlugin persistence lifecycle', () => {
 				remoteProvider: 'github',
 				forgejoBaseUrl: '',
 				forgejoToken: '',
+				pathFilterMode: 'fit',
 			});
 		});
 	});

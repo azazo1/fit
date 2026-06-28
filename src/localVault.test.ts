@@ -97,6 +97,24 @@ describe('LocalVault', () => {
 			expect(localVault.shouldTrackState('folder/.hidden/file.md')).toBe(false);
 		});
 
+		it('should always exclude git internal paths', () => {
+			const localVault = new LocalVault(mockVault as any as Vault);
+			localVault.configure({ syncHiddenFiles: true });
+
+			expect(localVault.shouldTrackState('.git/COMMIT_EDITMSG')).toBe(false);
+			expect(localVault.shouldTrackState('nested/.git/index')).toBe(false);
+			expect(localVault.shouldTrackState('.gitignore')).toBe(true);
+		});
+
+		it('should ignore hidden file toggle in git-compatible path mode', () => {
+			const localVault = new LocalVault(mockVault as any as Vault);
+			localVault.configure({ syncHiddenFiles: false, pathFilterMode: 'git' });
+
+			expect(localVault.shouldTrackState('.gitignore')).toBe(true);
+			expect(localVault.shouldTrackState('.obsidian/app.json')).toBe(true);
+			expect(localVault.shouldTrackState('.git/index')).toBe(false);
+		});
+
 		it('should track normal files', () => {
 			const localVault = new LocalVault(mockVault as any as Vault);
 
@@ -294,6 +312,98 @@ describe('LocalVault', () => {
 				'note.md': sha40,
 				'.gitignore': sha40
 			});
+		});
+
+		it('should discover hidden files in git-compatible path mode even when hidden toggle is off', async () => {
+			const normalFiles = [StubTFile.ofPath('note.md')];
+
+			mockVault.getFiles.mockReturnValue(normalFiles as TFile[]);
+			mockVault.readBinary.mockImplementation(async (file: TFile) => {
+				if (file.path === 'note.md') return new TextEncoder().encode('note content').buffer;
+				return new ArrayBuffer(0);
+			});
+			mockVault.getAbstractFileByPath.mockImplementation((path: string) => {
+				return normalFiles.find(f => f.path === path) ?? null;
+			});
+
+			(mockVault.adapter as any).list = vi.fn().mockImplementation(async (dir: string) => {
+				if (dir === '/') return { files: ['note.md'], folders: ['.obsidian'] };
+				if (dir === '.obsidian') return { files: ['.obsidian/app.json'], folders: [] };
+				return { files: [], folders: [] };
+			});
+			(mockVault.adapter as any).read = vi.fn().mockResolvedValue('');
+			(mockVault.adapter as any).readBinary = vi.fn().mockImplementation(async (path: string) => {
+				if (path === '.obsidian/app.json') return new TextEncoder().encode('{"theme":"dark"}').buffer;
+				return new ArrayBuffer(0);
+			});
+
+			const localVault = new LocalVault(mockVault as any as Vault);
+			localVault.configure({ syncHiddenFiles: false, pathFilterMode: 'git' });
+			const { state } = await localVault.readFromSource();
+
+			expect(state).toEqual({
+				'note.md': expect.stringMatching(/^[0-9a-f]{40}$/),
+				'.obsidian/app.json': expect.stringMatching(/^[0-9a-f]{40}$/)
+			});
+		});
+
+		it('should skip nested git worktrees and submodules during adapter scan', async () => {
+			const normalFiles = [
+				StubTFile.ofPath('note.md'),
+				StubTFile.ofPath('submodule/child.md'),
+				StubTFile.ofPath('nested/repo/file.md')
+			];
+
+			mockVault.getFiles.mockReturnValue(normalFiles as TFile[]);
+			mockVault.readBinary.mockImplementation(async (file: TFile) =>
+				new TextEncoder().encode(`content:${file.path}`).buffer
+			);
+			mockVault.getAbstractFileByPath.mockImplementation((path: string) => {
+				return normalFiles.find(f => f.path === path) ?? null;
+			});
+
+			(mockVault.adapter as any).list = vi.fn().mockImplementation(async (dir: string) => {
+				if (dir === '/') return { files: ['note.md'], folders: ['submodule', 'nested'] };
+				if (dir === 'submodule') return { files: ['submodule/.git', 'submodule/child.md'], folders: [] };
+				if (dir === 'nested') return { files: [], folders: ['nested/repo'] };
+				if (dir === 'nested/repo') return { files: ['nested/repo/file.md'], folders: ['nested/repo/.git'] };
+				return { files: [], folders: [] };
+			});
+			(mockVault.adapter as any).read = vi.fn().mockResolvedValue('');
+			(mockVault.adapter as any).readBinary = vi.fn().mockImplementation(async (path: string) =>
+				new TextEncoder().encode(`hidden:${path}`).buffer
+			);
+
+			const localVault = new LocalVault(mockVault as any as Vault);
+			localVault.configure({ syncHiddenFiles: true, pathFilterMode: 'git' });
+			const { state } = await localVault.readFromSource();
+
+			expect(Object.keys(state).sort()).toEqual(['note.md']);
+		});
+
+		it('should skip nested git worktree files from vault index when adapter scan is off', async () => {
+			const files = [
+				StubTFile.ofPath('note.md'),
+				StubTFile.ofPath('submodule/child.md')
+			];
+
+			mockVault.getFiles.mockReturnValue(files as TFile[]);
+			mockVault.readBinary.mockImplementation(async (file: TFile) =>
+				new TextEncoder().encode(`content:${file.path}`).buffer
+			);
+			mockVault.getAbstractFileByPath.mockImplementation((path: string) => {
+				return files.find(f => f.path === path) ?? null;
+			});
+			mockVault.adapter.stat.mockImplementation(async (path: string) => {
+				if (path === 'submodule/.git') return { type: 'file' };
+				return null;
+			});
+
+			const localVault = new LocalVault(mockVault as any as Vault);
+			localVault.configure({ syncHiddenFiles: false, pathFilterMode: 'fit' });
+			const { state } = await localVault.readFromSource();
+
+			expect(Object.keys(state).sort()).toEqual(['note.md']);
 		});
 	});
 

@@ -12,18 +12,6 @@ import { Vault } from "obsidian";
  * accidentally logging large content (e.g., base64 file data in API errors).
  */
 export const MAX_LOG_STRING_LENGTH = 2000;
-export const MAX_LOG_ARRAY_ITEMS = 20;
-const PATH_ARRAY_LOG_KEYS = new Set([
-	"paths",
-	"failedPaths",
-	"skippedPaths",
-	"rateLimitedPaths",
-	"remainingUnpushed",
-	"pendingClashes",
-	"ADDED",
-	"MODIFIED",
-	"REMOVED",
-]);
 
 /**
  * Minimal filesystem interface for a single log file.
@@ -86,19 +74,6 @@ function sanitizeForLogging(data: unknown, depth = 0, keyHint?: string): unknown
 	}
 
 	if (Array.isArray(data)) {
-		if (keyHint && PATH_ARRAY_LOG_KEYS.has(keyHint) && data.every(item => typeof item === "string")) {
-			return {
-				count: data.length,
-				omitted: "path list omitted",
-			};
-		}
-		if (data.length > MAX_LOG_ARRAY_ITEMS) {
-			return {
-				count: data.length,
-				sample: data.slice(0, MAX_LOG_ARRAY_ITEMS).map(item => sanitizeForLogging(item, depth + 1)),
-				omitted: data.length - MAX_LOG_ARRAY_ITEMS,
-			};
-		}
 		return data.map(item => sanitizeForLogging(item, depth + 1));
 	}
 

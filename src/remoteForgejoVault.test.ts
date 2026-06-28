@@ -44,6 +44,8 @@ function installForgejoFetchMock() {
 	let currentTree = "tree-1";
 	let simulateAlreadyExistsForPath: string | null = null;
 	let hideAlreadyExistsPathFromTree = false;
+	let returnShallowRootTree = false;
+	let failContentsListing = false;
 	let state = new Map<string, string>([
 		["notes/a.md", "sha-a"],
 	]);
@@ -58,6 +60,7 @@ function installForgejoFetchMock() {
 		const body = request.body ? JSON.parse(String(request.body)) : undefined;
 		requests.push({ method, url, body });
 		const apiPath = url.replace(`${BASE_URL}/api/v1`, "");
+		const apiPathWithoutQuery = apiPath.split("?")[0];
 
 		if (method === "GET" && apiPath === `/repos/${OWNER}/${REPO}/branches/${BRANCH}`) {
 			return jsonResponse(200, {
@@ -68,7 +71,15 @@ function installForgejoFetchMock() {
 			});
 		}
 
-		if (method === "GET" && apiPath === `/repos/${OWNER}/${REPO}/git/trees/${currentTree}?recursive=true`) {
+		if (method === "GET" && apiPath === `/repos/${OWNER}/${REPO}/git/trees/${currentTree}`) {
+			if (returnShallowRootTree) {
+				return jsonResponse(200, {
+					sha: currentTree,
+					tree: [
+						{ path: "notes", type: "tree", sha: "tree-notes" },
+					],
+				});
+			}
 			return jsonResponse(200, {
 				sha: currentTree,
 				tree: [
@@ -81,11 +92,45 @@ function installForgejoFetchMock() {
 			});
 		}
 
-		if (method === "GET" && apiPath.startsWith(`/repos/${OWNER}/${REPO}/contents/`)) {
-			const path = decodeURIComponent(apiPath.replace(`/repos/${OWNER}/${REPO}/contents/`, ""));
+		if (method === "GET" && apiPath === `/repos/${OWNER}/${REPO}/git/trees/tree-notes`) {
+			return jsonResponse(200, {
+				sha: "tree-notes",
+				tree: [
+					{ path: "a.md", type: "blob", sha: "sha-a" },
+					{ path: "nested/b.md", type: "blob", sha: "sha-b" },
+				],
+			});
+		}
+
+		if (method === "GET" && apiPathWithoutQuery.startsWith(`/repos/${OWNER}/${REPO}/contents`)) {
+			const rawPath = apiPathWithoutQuery.replace(`/repos/${OWNER}/${REPO}/contents`, "").replace(/^\//, "");
+			const path = decodeURIComponent(rawPath);
+			if (failContentsListing) {
+				return jsonResponse(500, { message: "contents unavailable" });
+			}
 			const sha = state.get(path);
-			return sha
-				? jsonResponse(200, { type: "file", sha })
+			if (sha && path) {
+				return jsonResponse(200, {
+					name: path.split("/").pop(),
+					path,
+					type: "file",
+					sha,
+				});
+			}
+			const prefix = path ? `${path}/` : "";
+			const children = new Map<string, {name: string; path: string; type: string; sha?: string}>();
+			for (const [filePath, fileSha] of state.entries()) {
+				if (!filePath.startsWith(prefix)) continue;
+				const rest = filePath.slice(prefix.length);
+				if (!rest) continue;
+				const [name, ...remaining] = rest.split("/");
+				const childPath = joinMockPath(prefix, name);
+				children.set(childPath, remaining.length === 0
+					? { name, path: childPath, type: "file", sha: fileSha }
+					: { name, path: childPath, type: "dir" });
+			}
+			return children.size > 0
+				? jsonResponse(200, Array.from(children.values()))
 				: jsonResponse(404, { message: "file not found" });
 		}
 
@@ -140,7 +185,19 @@ function installForgejoFetchMock() {
 		hideAlreadyExistsPathFromTree() {
 			hideAlreadyExistsPathFromTree = true;
 		},
+		returnShallowRootTree() {
+			returnShallowRootTree = true;
+			state.set("notes/nested/b.md", "sha-b");
+			blobs.set("sha-b", "YmV0YQ==");
+		},
+		failContentsListing() {
+			failContentsListing = true;
+		},
 	};
+}
+
+function joinMockPath(prefix: string, name: string): string {
+	return prefix ? `${prefix}${name}` : name;
 }
 
 describe("RemoteForgejoVault", () => {
@@ -154,7 +211,7 @@ describe("RemoteForgejoVault", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("reads tree state and filters non-blob nodes", async () => {
+	it("reads repository state through tree API", async () => {
 		installForgejoFetchMock();
 		const vault = makeVault();
 
@@ -165,6 +222,21 @@ describe("RemoteForgejoVault", () => {
 			commitSha: "commit-1",
 			treeSha: "tree-1",
 		});
+	});
+
+	it("falls back to child tree fetches when contents API is unavailable", async () => {
+		const forgejo = installForgejoFetchMock();
+		forgejo.returnShallowRootTree();
+		forgejo.failContentsListing();
+		const vault = makeVault();
+
+		const result = await vault.readFromSource();
+
+		expect(result.state).toEqual({
+			"notes/a.md": "sha-a",
+			"notes/nested/b.md": "sha-b",
+		});
+		expect(forgejo.requests.some(r => r.method === "GET" && r.url.endsWith("/git/trees/tree-notes"))).toBe(true);
 	});
 
 	it("reads file content from the latest loaded remote state", async () => {
@@ -232,19 +304,19 @@ describe("RemoteForgejoVault", () => {
 			{ path: "notes/race.md", type: "ADDED" },
 		]);
 		expect(forgejo.requests.some(r => r.method === "POST" && r.url.endsWith("/contents/notes/race.md"))).toBe(true);
-		expect(forgejo.requests.some(r => r.method === "GET" && r.url.endsWith("/contents/notes/race.md"))).toBe(true);
+		expect(forgejo.requests.some(r => r.method === "GET" && r.url.includes("/contents/notes/race.md"))).toBe(true);
 		expect(forgejo.requests.some(r => r.method === "PUT" && r.url.endsWith("/contents/notes/race.md"))).toBe(true);
-		expect(forgejo.requests.filter(r => r.method === "GET" && r.url.includes("/git/trees/"))).toHaveLength(2);
+		expect(forgejo.requests.filter(r => r.method === "GET" && r.url.includes("/git/trees/"))).toHaveLength(4);
 		expect(result.newState["notes/race.md"]).toBe("notes/race.md-sha-3");
 	});
 
-	it("uses tree fallback when contents API cannot find an existing file", async () => {
+	it("uses refreshed state when direct contents lookup misses an existing file", async () => {
 		const forgejo = installForgejoFetchMock();
 		forgejo.simulateAlreadyExists("notes/race.md");
 		const vault = makeVault();
 		const originalImplementation = forgejo.requestUrlMock.getMockImplementation()!;
 		forgejo.requestUrlMock.mockImplementation((async (request: any) => {
-			if ((request.method ?? "GET") === "GET" && request.url.endsWith("/contents/notes/race.md")) {
+			if ((request.method ?? "GET") === "GET" && request.url.includes("/contents/notes/race.md")) {
 				forgejo.requests.push({ method: "GET", url: request.url, body: undefined });
 				return jsonResponse(404, { message: "file not found" });
 			}
@@ -256,8 +328,8 @@ describe("RemoteForgejoVault", () => {
 			[]
 		);
 
-		expect(forgejo.requests.some(r => r.method === "GET" && r.url.endsWith("/contents/notes/race.md"))).toBe(true);
-		expect(forgejo.requests.filter(r => r.method === "GET" && r.url.includes("/git/trees/"))).toHaveLength(3);
+		expect(forgejo.requests.some(r => r.method === "GET" && r.url.includes("/contents/notes/race.md"))).toBe(true);
+		expect(forgejo.requests.filter(r => r.method === "GET" && r.url.includes("/git/trees/"))).toHaveLength(6);
 		expect(forgejo.requests.some(r => r.method === "PUT" && r.url.endsWith("/contents/notes/race.md"))).toBe(true);
 		expect(result.changes).toEqual([
 			{ path: "notes/race.md", type: "ADDED" },

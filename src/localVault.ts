@@ -5,7 +5,7 @@
  */
 
 import { DataAdapter, ListedFiles, TFile, TFolder, Vault } from "obsidian";
-import { ObsidianSyncRules } from "@/fitSettings";
+import { ObsidianSyncRules, type PathFilterMode } from "@/fitSettings";
 import { ApplyChangesResult, IVault, VaultError, VaultReadResult } from "./vault";
 import { FileChange } from "./util/changeTracking";
 import { fitLogger } from "./logger";
@@ -16,6 +16,7 @@ import { FilePath, detectNormalizationIssues } from "./util/filePath";
 import { withSlowOperationMonitoring } from "./util/asyncMonitoring";
 import { findSuspiciousCorrespondences } from "./util/pathPattern";
 import { GitignoreFilter } from "./util/gitignore";
+import { isGitInternalPath } from "./util/gitPath";
 
 /**
  * Helper to process Promise.allSettled results and collect failures
@@ -45,23 +46,55 @@ function isBinaryExtensionForLegacySha(extension: string): boolean {
 	return LEGACY_BINARY_EXT_FOR_SHA.has(normalized.toLowerCase());
 }
 
+type AdapterPathScan = {
+	hiddenPaths: string[];
+	nestedGitRoots: Set<string>;
+};
+
 /**
- * Recursively scan vault adapter for hidden file paths (any path component starts with '.').
- * vault.getFiles() does not return hidden files, so this adapter-based scan is needed
- * when syncHiddenFiles is enabled. Results are vault-relative paths.
+ * Recursively scan vault adapter for paths that Obsidian's vault index cannot model.
+ * Results are vault-relative paths.
  */
-async function scanHiddenPaths(adapter: DataAdapter): Promise<string[]> {
-	const results: string[] = [];
-	await collectHiddenInDir(adapter, '/', results);
-	return results;
+async function scanAdapterPaths(adapter: DataAdapter): Promise<AdapterPathScan> {
+	const result: AdapterPathScan = {
+		hiddenPaths: [],
+		nestedGitRoots: new Set(),
+	};
+	await collectAdapterPaths(adapter, '/', result, false);
+	return result;
 }
 
-async function collectHiddenInDir(
+async function detectNestedGitRoots(adapter: DataAdapter, filePaths: string[]): Promise<Set<string>> {
+	const candidateDirs = deriveAncestorDirs(filePaths);
+	const roots = new Set<string>();
+
+	await Promise.all(
+		Array.from(candidateDirs).map(async (dir) => {
+			try {
+				const stat = await adapter.stat(joinPath(dir, ".git"));
+				if (stat) {
+					roots.add(dir);
+				}
+			} catch {
+				// Directory is not a nested git checkout or cannot be inspected.
+			}
+		})
+	);
+
+	return roots;
+}
+
+async function collectAdapterPaths(
 	adapter: DataAdapter,
 	dir: string,
-	results: string[],
+	result: AdapterPathScan,
 	dirIsHidden = false
 ): Promise<void> {
+	const normalizedDir = normalizeDirPath(dir);
+	if (isGitInternalPath(normalizedDir) || isInsideNestedGitWorktree(normalizedDir, result.nestedGitRoots)) {
+		return;
+	}
+
 	let listing: ListedFiles;
 	try {
 		listing = await adapter.list(dir);
@@ -69,19 +102,66 @@ async function collectHiddenInDir(
 		return;
 	}
 
+	if (normalizedDir && hasGitMarker(listing, normalizedDir)) {
+		result.nestedGitRoots.add(normalizedDir);
+		return;
+	}
+
 	for (const file of listing.files) {
-		// Skip per-file check when already inside a hidden directory — all paths are hidden
+		if (isGitInternalPath(file) || isInsideNestedGitWorktree(file, result.nestedGitRoots)) {
+			continue;
+		}
+		// Skip per-file check when already inside a hidden directory.
 		if (dirIsHidden || file.split('/').some(part => part.startsWith('.'))) {
-			results.push(file);
+			result.hiddenPaths.push(file);
 		}
 	}
 
 	await Promise.all(
 		listing.folders.map(folder => {
+			if (isGitInternalPath(folder) || isInsideNestedGitWorktree(folder, result.nestedGitRoots)) {
+				return Promise.resolve();
+			}
 			const folderIsHidden = dirIsHidden || folder.split('/').some(p => p.startsWith('.'));
-			return collectHiddenInDir(adapter, folder, results, folderIsHidden);
+			return collectAdapterPaths(adapter, folder, result, folderIsHidden);
 		})
 	);
+}
+
+function normalizeDirPath(dir: string): string {
+	return dir === "/" ? "" : dir.replace(/^\/+|\/+$/g, "");
+}
+
+function joinPath(dir: string, name: string): string {
+	return dir ? `${dir}/${name}` : name;
+}
+
+function deriveAncestorDirs(filePaths: string[]): Set<string> {
+	const dirs = new Set<string>();
+	for (const filePath of filePaths) {
+		const parts = filePath.split('/');
+		for (let i = 1; i < parts.length; i++) {
+			const dir = parts.slice(0, i).join('/');
+			if (dir && !isGitInternalPath(dir)) {
+				dirs.add(dir);
+			}
+		}
+	}
+	return dirs;
+}
+
+function hasGitMarker(listing: ListedFiles, dir: string): boolean {
+	const gitPath = joinPath(dir, ".git");
+	return listing.files.includes(gitPath) || listing.folders.includes(gitPath);
+}
+
+function isInsideNestedGitWorktree(path: string, gitWorktreeRoots: Set<string>): boolean {
+	for (const root of gitWorktreeRoots) {
+		if (root && (path === root || path.startsWith(`${root}/`))) {
+			return true;
+		}
+	}
+	return false;
 }
 
 /**
@@ -99,17 +179,21 @@ export class LocalVault implements IVault<"local"> {
 	private vault: Vault;
 	private syncHiddenFiles = true;
 	private obsidianSyncRules: ObsidianSyncRules = {};
+	private pathFilterMode: PathFilterMode = "fit";
 
 	constructor(vault: Vault) {
 		this.vault = vault;
 	}
 
-	configure(opts: { syncHiddenFiles?: boolean; obsidianSyncRules?: ObsidianSyncRules }): void {
+	configure(opts: { syncHiddenFiles?: boolean; obsidianSyncRules?: ObsidianSyncRules; pathFilterMode?: PathFilterMode }): void {
 		if (opts.syncHiddenFiles !== undefined) {
 			this.syncHiddenFiles = opts.syncHiddenFiles;
 		}
 		if (opts.obsidianSyncRules !== undefined) {
 			this.obsidianSyncRules = opts.obsidianSyncRules;
+		}
+		if (opts.pathFilterMode !== undefined) {
+			this.pathFilterMode = opts.pathFilterMode;
 		}
 	}
 
@@ -132,6 +216,10 @@ export class LocalVault implements IVault<"local"> {
 	 * configurable via settings with an opt-out for users who encounter issues.
 	 */
 	shouldTrackState(filePath: string): boolean {
+		if (isGitInternalPath(filePath)) {
+			return false;
+		}
+
 		// When syncHiddenFiles is disabled, exclude hidden files/directories
 		// (any path component starting with .). This is critical because Obsidian's
 		// Vault API can write hidden files but cannot read them back
@@ -141,7 +229,7 @@ export class LocalVault implements IVault<"local"> {
 		// vault.adapter.readBinary() instead of the vault index.
 		//
 		// Obsidian vault paths always use forward slashes (even on Windows)
-		if (!this.syncHiddenFiles) {
+		if (this.pathFilterMode !== "git" && !this.syncHiddenFiles) {
 			const parts = filePath.split('/');
 			if (parts.some(part => part.startsWith('.'))) {
 				// Explicitly opted-in obsidian paths are tracked regardless of syncHiddenFiles
@@ -176,31 +264,49 @@ export class LocalVault implements IVault<"local"> {
 	async readFromSource(): Promise<VaultReadResult> {
 		const allFiles = this.vault.getFiles();
 		const vaultIndexPaths = allFiles.map(f => f.path);
+		const shouldScanAdapterPaths = this.syncHiddenFiles || this.pathFilterMode === "git";
 
-		// When syncHiddenFiles is enabled, also discover hidden paths via adapter
+		// When enabled, also discover hidden paths via adapter
 		// (vault.getFiles() only returns non-hidden files due to Obsidian API limitations).
 		// This involves a full recursive directory scan and has performance overhead.
 		let hiddenPaths: string[] = [];
-		if (this.syncHiddenFiles) {
-			hiddenPaths = await scanHiddenPaths(this.vault.adapter);
+		let nestedGitRoots = new Set<string>();
+		if (shouldScanAdapterPaths) {
+			const adapterScan = await scanAdapterPaths(this.vault.adapter);
+			hiddenPaths = adapterScan.hiddenPaths;
+			nestedGitRoots = adapterScan.nestedGitRoots;
 			if (hiddenPaths.length > 0) {
 				fitLogger.log('[LocalVault] Hidden paths discovered via adapter scan', {
 					count: hiddenPaths.length, paths: hiddenPaths
 				});
 			}
+			if (nestedGitRoots.size > 0) {
+				fitLogger.log('[LocalVault] Nested git worktrees skipped during adapter scan', {
+					count: nestedGitRoots.size, paths: Array.from(nestedGitRoots)
+				});
+			}
+		} else {
+			nestedGitRoots = await detectNestedGitRoots(this.vault.adapter, vaultIndexPaths);
+			if (nestedGitRoots.size > 0) {
+				fitLogger.log('[LocalVault] Nested git worktrees skipped from vault index', {
+					count: nestedGitRoots.size, paths: Array.from(nestedGitRoots)
+				});
+			}
 		}
 
-		const allPaths = this.syncHiddenFiles ? [...vaultIndexPaths, ...hiddenPaths] : vaultIndexPaths;
+		const allPaths = shouldScanAdapterPaths ? [...vaultIndexPaths, ...hiddenPaths] : vaultIndexPaths;
 
 		// Filter to only tracked paths (excludes hidden files when syncHiddenFiles is off)
-		const trackedPaths = allPaths.filter(path => this.shouldTrackState(path));
-		const untrackedPaths = allPaths.filter(path => !this.shouldTrackState(path));
+		const trackedPaths = allPaths.filter(path =>
+			this.shouldTrackState(path) && !isInsideNestedGitWorktree(path, nestedGitRoots));
+		const untrackedPaths = allPaths.filter(path =>
+			!this.shouldTrackState(path) || isInsideNestedGitWorktree(path, nestedGitRoots));
 
 		// Create map for quick file size lookups (vault-indexed files only; hidden files lack TFile.stat)
 		const fileSizeMap = new Map(allFiles.map(f => [f.path, f.stat.size]));
 
 		if (untrackedPaths.length > 0) {
-			fitLogger.log('[LocalVault] Untracked paths in local scan (hidden files)', {
+			fitLogger.log('[LocalVault] Untracked paths in local scan', {
 				paths: untrackedPaths
 			});
 		}

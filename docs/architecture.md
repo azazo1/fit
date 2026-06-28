@@ -90,7 +90,7 @@ Both local and remote caches use the canonical Git blob SHA format: `SHA1("blob 
 - **Fit**: Coordinator between vaults with clean abstractions
   - Owns LocalVault and the selected remote vault implementation
   - Provides `getLocalChanges()` / `getRemoteChanges()` abstractions
-  - Implements sync policy via `shouldSyncPath()` (ignores paths like 📁 `_fit/` and `.obsidian/`)
+  - Implements sync policy via `shouldSyncPath()` (ignores internal paths like 📁 `_fit/` and `.git/`; `.obsidian/` handling depends on path filter mode)
   - Detects clashes between local and remote changes via `getClashedChanges()`
 
 - **FitSync**: High-level sync workflow and 🔀 conflict resolution

@@ -401,6 +401,33 @@ describe('FitSync', () => {
 			});
 		});
 
+		it('should sync .obsidian files directly in git-compatible path mode', async () => {
+			const fitSync = createFitSync();
+			fitSync.fit.loadSettings({
+				...testSettings,
+				pathFilterMode: 'git',
+				syncHiddenFiles: false,
+				obsidianSyncRules: {},
+			} as FitSettings);
+			fitSync.fit.remoteVault = remoteVault as any;
+
+			await remoteVault.applyChanges([
+				{ path: '.obsidian/app.json', content: FileContent.fromPlainText('{"theme":"dark"}') },
+				{ path: 'normal.md', content: FileContent.fromPlainText('Normal file') }
+			], []);
+
+			const mockNotice = createMockNotice();
+			const result = await syncAndHandleResult(fitSync, mockNotice);
+
+			expect(result).toMatchObject({ success: true });
+			expect(localVault.getAllFilesAsRaw()).toEqual({
+				'.obsidian/app.json': '{"theme":"dark"}',
+				'normal.md': 'Normal file'
+			});
+			expect(localStoreState.localShas['.obsidian/app.json']).toBeDefined();
+			expect(localStoreState.lastFetchedRemoteShas['.obsidian/app.json']).toBeDefined();
+		});
+
 		it('should exclude 📁 _fit/ directory from sync operations', async () => {
 			// === SETUP: Initial synced state ===
 			const fitSync = createFitSync();
@@ -547,6 +574,34 @@ describe('FitSync', () => {
 		});
 
 		describe('shouldSyncPath — dynamic ownDataPath', () => {
+			it('blocks git internal paths without blocking .gitignore', () => {
+				const fit = new Fit(
+					testSettings as FitSettings,
+					makeLocalStore(),
+					{} as unknown as Vault
+				);
+				expect(fit.shouldSyncPath('.git/COMMIT_EDITMSG')).toBe(false);
+				expect(fit.shouldSyncPath('nested/.git/index')).toBe(false);
+				expect(fit.shouldSyncPath('.gitignore')).toBe(true);
+			});
+
+			it('allows obsidian paths in git-compatible path mode while keeping internal dirs blocked', () => {
+				const fit = new Fit(
+					{
+						...testSettings,
+						pathFilterMode: 'git',
+						syncHiddenFiles: false,
+						obsidianSyncRules: {},
+					} as FitSettings,
+					makeLocalStore(),
+					{} as unknown as Vault
+				);
+				expect(fit.shouldSyncPath('.obsidian/app.json')).toBe(true);
+				expect(fit.shouldSyncPath('_fit/.obsidian/app.json')).toBe(false);
+				expect(fit.shouldSyncPath('.git/index')).toBe(false);
+				expect(fit.shouldSyncPath('.obsidian/plugins/fit/data.json')).toBe(false);
+			});
+
 			it('blocks own data.json when pluginDir matches install dir', () => {
 				const fit = new Fit(
 					testSettings as FitSettings,

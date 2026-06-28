@@ -13,6 +13,7 @@ export interface ObsidianSyncRule {
 export type ObsidianSyncRules = Record<string, ObsidianSyncRule>;
 
 export type RemoteProvider = "github" | "forgejo";
+export type PathFilterMode = "fit" | "git";
 
 /** True if the UI can safely read/write this rule (v1 strategies only). */
 export function isUiManaged(rule: ObsidianSyncRule): boolean {
@@ -48,6 +49,7 @@ export interface FitSettings {
 	notifyChanges: boolean
 	notifyConflicts: boolean
 	enableDebugLogging: boolean
+	pathFilterMode: PathFilterMode
 	syncHiddenFiles: boolean
 	obsidianSyncRules: ObsidianSyncRules
 }
@@ -68,6 +70,7 @@ export const DEFAULT_SETTINGS: FitSettings = {
 	notifyChanges: true,
 	notifyConflicts: true,
 	enableDebugLogging: true,
+	pathFilterMode: "fit",
 	syncHiddenFiles: true,
 	obsidianSyncRules: {},
 };

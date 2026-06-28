@@ -411,6 +411,8 @@ export class FakeLocalVault implements IVault<"local"> {
 	private statLog: string[] = []; // Track all stat operations for performance testing
 	private mockWriteFile: ((path: string) => Promise<void>) | null = null; // Mock for writeFile operations
 
+	configure(): void {}
+
 	/**
 	 * Configure the vault to fail on a specific operation.
 	 * @param scenario - Which operation should fail ('read', 'stat', 'write')

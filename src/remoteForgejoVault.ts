@@ -57,10 +57,14 @@ type ForgejoFileChangeResponse = {
 	};
 };
 
-type ForgejoContentsResponse = {
+type ForgejoContentsItem = {
+	name?: string;
+	path?: string;
 	sha?: string;
 	type?: string;
 };
+
+type ForgejoContentsResponse = ForgejoContentsItem | ForgejoContentsItem[];
 
 export class RemoteForgejoVault implements IRemoteVault {
 	private baseUrl: string;
@@ -261,17 +265,39 @@ export class RemoteForgejoVault implements IRemoteVault {
 	}
 
 	private async buildStateFromTree(treeSha: TreeSha): Promise<FileStates> {
-		const tree = treeSha === EMPTY_TREE_SHA
-			? { tree: [] as ForgejoTreeNode[] }
-			: await this.request<ForgejoTreeResponse>(
-				"GET",
-				`/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/git/trees/${treeSha}?recursive=true`
-			);
+		try {
+			return await this.buildStateFromGitTree(treeSha);
+		} catch (error) {
+			if (treeSha === EMPTY_TREE_SHA) throw error;
+			fitLogger.log("[RemoteVault] Forgejo tree listing failed, falling back to contents API", error);
+			return await this.buildStateFromContents();
+		}
+	}
 
+	private async buildStateFromContents(): Promise<FileStates> {
+		const nodes = await this.fetchContentNodes();
+		return await this.buildStateFromNodes(nodes, "file");
+	}
+
+	private async buildStateFromGitTree(treeSha: TreeSha): Promise<FileStates> {
+		const nodes = treeSha === EMPTY_TREE_SHA
+			? [] as ForgejoTreeNode[]
+			: await this.fetchTreeNodes(treeSha);
+
+		fitLogger.log("[RemoteVault] Forgejo tree listing complete", {
+			nodes: nodes.length,
+			files: nodes.filter(node => node.type === "blob").length,
+		});
+
+		return await this.buildStateFromNodes(nodes, "blob");
+	}
+
+	private async buildStateFromNodes(nodes: ForgejoTreeNode[], fileType: "blob" | "file"): Promise<FileStates> {
 		const state: FileStates = {};
 		const failedPaths: Array<{path: string, error: unknown}> = [];
-		for (const node of tree.tree ?? []) {
-			if (node.type !== "blob" || !node.path || !node.sha) {
+
+		for (const node of nodes) {
+			if (node.type !== fileType || !node.path || !node.sha) {
 				continue;
 			}
 			let path = node.path;
@@ -299,6 +325,61 @@ export class RemoteForgejoVault implements IRemoteVault {
 		}
 
 		return state;
+	}
+
+	private async fetchContentNodes(
+		path: string = "",
+		seen: Set<string> = new Set()
+	): Promise<ForgejoTreeNode[]> {
+		if (seen.has(path)) return [];
+		seen.add(path);
+
+		const response = await this.request<ForgejoContentsResponse>(
+			"GET",
+			this.contentsPath(path)
+		);
+		const items = (Array.isArray(response) ? response : [response])
+			.map(item => ({
+				...item,
+				path: item.path ?? (item.name ? joinTreePath(path, item.name) : undefined),
+			}));
+		const nodes: ForgejoTreeNode[] = [];
+
+		for (const item of items) {
+			if (item.type === "dir" && item.path) {
+				nodes.push(...await this.fetchContentNodes(item.path, seen));
+				continue;
+			}
+			nodes.push(item);
+		}
+
+		return nodes;
+	}
+
+	private async fetchTreeNodes(
+		treeSha: TreeSha,
+		prefix: string = "",
+		seen: Set<string> = new Set()
+	): Promise<ForgejoTreeNode[]> {
+		const seenKey = `${prefix}:${treeSha}`;
+		if (seen.has(seenKey)) return [];
+		seen.add(seenKey);
+
+		const tree = await this.request<ForgejoTreeResponse>(
+			"GET",
+			`/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/git/trees/${treeSha}`
+		);
+		const nodes = (tree.tree ?? []).map(node => ({
+			...node,
+			path: node.path ? joinTreePath(prefix, node.path) : node.path,
+		}));
+		const childNodeGroups = await mapWithConcurrency(
+			nodes.filter(node => node.type === "tree" && node.path && node.sha),
+			8,
+			node => this.fetchTreeNodes(node.sha as TreeSha, node.path as string, seen)
+		);
+
+		return [...nodes, ...childNodeGroups.flat()];
 	}
 
 	private async toRemotePath(path: string): Promise<string> {
@@ -362,7 +443,10 @@ export class RemoteForgejoVault implements IRemoteVault {
 
 	private async readExistingContentSha(contentPath: string): Promise<string | null> {
 		try {
-			const response = await this.request<ForgejoContentsResponse>("GET", contentPath);
+			const response = await this.request<ForgejoContentsResponse>("GET", this.withBranchRef(contentPath));
+			if (Array.isArray(response)) {
+				return null;
+			}
 			if (response.type && response.type !== "file") {
 				return null;
 			}
@@ -382,10 +466,46 @@ export class RemoteForgejoVault implements IRemoteVault {
 			`Repository '${this.owner}/${this.repo}' or branch '${this.branch}' not found`
 		);
 	}
+
+	private contentsPath(path: string): string {
+		const encodedPath = path ? `/${encodePath(path)}` : "/";
+		return this.withBranchRef(
+			`/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/contents${encodedPath}`
+		);
+	}
+
+	private withBranchRef(path: string): string {
+		const separator = path.includes("?") ? "&" : "?";
+		return `${path}${separator}ref=${encodeURIComponent(this.branch)}`;
+	}
 }
 
 function encodePath(path: string): string {
 	return path.split("/").map(encodeURIComponent).join("/");
+}
+
+function joinTreePath(prefix: string, path: string): string {
+	if (!prefix) return path;
+	if (path.startsWith(`${prefix}/`)) return path;
+	return `${prefix}/${path}`;
+}
+
+async function mapWithConcurrency<T, R>(
+	items: T[],
+	limit: number,
+	mapper: (item: T) => Promise<R>
+): Promise<R[]> {
+	const results: R[] = [];
+	let nextIndex = 0;
+	const workerCount = Math.min(limit, items.length);
+	await Promise.all(Array.from({ length: workerCount }, async () => {
+		while (nextIndex < items.length) {
+			const index = nextIndex;
+			nextIndex += 1;
+			results[index] = await mapper(items[index]);
+		}
+	}));
+	return results;
 }
 
 function isForgejoFileExistsError(error: unknown): boolean {

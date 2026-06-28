@@ -46,6 +46,17 @@ function findButtonByText(container: HTMLElement, buttonText: string): HTMLButto
 	return buttons.find(btn => btn.textContent === buttonText) as HTMLButtonElement || null;
 }
 
+function findToggleByLabel(container: HTMLElement, labelText: string): HTMLInputElement | null {
+	const settings = Array.from(container.querySelectorAll('.setting-item'));
+	for (const setting of settings) {
+		const nameEl = setting.querySelector('.setting-item-name');
+		if (nameEl?.textContent === labelText) {
+			return setting.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
+		}
+	}
+	return null;
+}
+
 describe('FitSettingTab - GitHub settings', () => {
 	let consoleLogSpy: MockInstance<typeof console.log>;
 	let consoleErrorSpy: MockInstance<typeof console.error>;
@@ -362,6 +373,33 @@ describe('FitSettingTab - GitHub settings', () => {
 		const ownerInput = findInputByLabel(settingTab.containerEl, 'Repository owner')!;
 		expect(ownerInput.value).toBe('alice');
 		expect(fakePlugin.settings.owner).toBe('alice');
+	});
+
+	it('should disable extra filtering controls in git-compatible path mode', async () => {
+		const fakePlugin: any = {
+			settings: {
+				...EMPTY_SETTINGS,
+				deviceName: '',
+				checkEveryXMinutes: 5,
+				autoSync: 'off',
+				syncHiddenFiles: true,
+				pathFilterMode: 'git',
+				obsidianSyncRules: { '.obsidian/appearance.json': {} },
+			},
+			saveSettings: async () => {},
+			fit: { loadSettings: () => {} },
+			logger: mockLogger
+		};
+
+		const settingTab = new FitSettingTab({} as any, fakePlugin);
+
+		settingTab.localConfigBlock();
+		settingTab.obsidianSyncBlock();
+
+		const hiddenToggle = findToggleByLabel(settingTab.containerEl, 'Sync hidden files')!;
+		expect(hiddenToggle.disabled).toBe(true);
+		expect(settingTab.containerEl.textContent).toContain('Git-compatible path mode');
+		expect(settingTab.containerEl.textContent).not.toContain('Appearance (theme, fonts, CSS snippets)');
 	});
 
 	it('should clear branches when fetching fails (repo not found)', async () => {

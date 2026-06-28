@@ -1,5 +1,5 @@
 import FitPlugin from "@/fitPlugin";
-import { findNewFields, isUiManaged, type RemoteProvider } from "@/fitSettings";
+import { findNewFields, isUiManaged, type PathFilterMode, type RemoteProvider } from "@/fitSettings";
 import { OBSIDIAN_ALWAYS_EXCLUDED, OBSIDIAN_NEEDS_MERGE } from "@/fit";
 import { App, PluginSettingTab, Setting, TextComponent } from "obsidian";
 import { setEqual } from "./utils";
@@ -803,15 +803,32 @@ export default class FitSettingTab extends PluginSettingTab {
 			checkIntervalSlider.settingEl.addClass("clear");
 		}
 
+		const isGitPathMode = this.plugin.settings.pathFilterMode === "git";
+
+		new Setting(containerEl)
+			.setName("Path filtering mode")
+			.setDesc("FIT safety mode protects Obsidian config paths unless selected below. Git-compatible mode follows .gitignore-style path visibility and disables the extra Obsidian and hidden-file filters.")
+			.addDropdown(dropdown => dropdown
+				.addOption("fit", "FIT safety mode")
+				.addOption("git", "Git-compatible mode")
+				.setValue(this.plugin.settings.pathFilterMode ?? "fit")
+				.onChange(async (value) => {
+					this.plugin.settings.pathFilterMode = value as PathFilterMode;
+					await this.plugin.saveSettings();
+					await this.display();
+				}));
+
 		// Hidden files setting
 		new Setting(containerEl)
 			.setName("Sync hidden files")
 			.setDesc("Include files and folders whose names start with '.' (e.g. .gitignore, .env). " +
 				"Disable if you notice slower syncs on a very large vault — " +
 				"it adds a recursive directory scan on each sync. " +
-				"Add a .gitignore to exclude specific hidden paths (e.g. .env, .DS_Store).")
+				"Add a .gitignore to exclude specific hidden paths (e.g. .env, .DS_Store). " +
+				"Disabled in Git-compatible path mode.")
 			.addToggle(toggle => toggle
 				.setValue(this.plugin.settings.syncHiddenFiles)
+				.setDisabled(isGitPathMode)
 				.onChange(async (value) => {
 					this.plugin.settings.syncHiddenFiles = value;
 					await this.plugin.saveSettings();
@@ -824,8 +841,14 @@ export default class FitSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setHeading()
 			.setName("Obsidian config sync")
-			.setDesc("Sync selected Obsidian config files across devices. " +
-				"Workspace layout and FIT's own data are always excluded.");
+			.setDesc(this.plugin.settings.pathFilterMode === "git"
+				? "Disabled in Git-compatible path mode. Obsidian config paths are handled by .gitignore-style filtering."
+				: "Sync selected Obsidian config files across devices. " +
+					"Workspace layout and FIT's own data are always excluded.");
+
+		if (this.plugin.settings.pathFilterMode === "git") {
+			return;
+		}
 
 		const rules = this.plugin.settings.obsidianSyncRules;
 

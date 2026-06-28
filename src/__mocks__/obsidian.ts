@@ -248,6 +248,32 @@ export class ToggleComponent {
 }
 
 /**
+ * Minimal SliderComponent that wraps a range input.
+ */
+export class SliderComponent {
+	sliderEl: HTMLInputElement;
+
+	constructor(containerEl: HTMLElement) {
+		this.sliderEl = document.createElement('input');
+		this.sliderEl.type = 'range';
+		containerEl.appendChild(this.sliderEl);
+	}
+
+	setLimits(min: number, max: number, step: number) {
+		this.sliderEl.min = String(min);
+		this.sliderEl.max = String(max);
+		this.sliderEl.step = String(step);
+		return this;
+	}
+	setValue(value: number) { this.sliderEl.value = String(value); return this; }
+	setDynamicTooltip() { return this; }
+	onChange(cb: (value: number) => void) {
+		this.sliderEl.addEventListener('input', () => cb(Number(this.sliderEl.value)));
+		return this;
+	}
+}
+
+/**
  * Minimal TextAreaComponent that wraps a real textarea element.
  */
 export class TextAreaComponent {
@@ -317,6 +343,11 @@ export class Setting {
 
 	addToggle(cb: (toggle: ToggleComponent) => void) {
 		cb(new ToggleComponent(this.controlEl));
+		return this;
+	}
+
+	addSlider(cb: (slider: SliderComponent) => void) {
+		cb(new SliderComponent(this.controlEl));
 		return this;
 	}
 
