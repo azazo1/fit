@@ -6,7 +6,7 @@
 
 import { DataAdapter, ListedFiles, TFile, TFolder, Vault } from "obsidian";
 import { ObsidianSyncRules, type PathFilterMode } from "@/fitSettings";
-import { ApplyChangesResult, IVault, VaultError, VaultReadResult } from "./vault";
+import { ApplyChangesOptions, ApplyChangesResult, IVault, VaultError, VaultReadResult } from "./vault";
 import { FileChange } from "./util/changeTracking";
 import { fitLogger } from "./logger";
 import { Base64Content, FileContent } from "./util/contentEncoding";
@@ -669,7 +669,7 @@ export class LocalVault implements IVault<"local"> {
 	async applyChanges(
 		filesToWrite: Array<{path: string, content: FileContent}>,
 		filesToDelete: Array<string>,
-		options?: { clashPaths?: Set<string> }
+		options?: ApplyChangesOptions
 	): Promise<ApplyChangesResult<"local">> {
 		const clashPaths = options?.clashPaths ?? new Set();
 		// Diagnostic: detect remote paths that share an ASCII-alphanumeric-sandwich pattern

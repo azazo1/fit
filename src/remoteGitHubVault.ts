@@ -8,7 +8,7 @@
 import { LocalStores } from "@/localStores";
 import { Octokit } from "@octokit/core";
 import { retry } from "@octokit/plugin-retry";
-import { ApplyChangesResult, IRemoteVault, VaultError, VaultReadResult } from "./vault";
+import { ApplyChangesOptions, ApplyChangesResult, IRemoteVault, VaultError, VaultReadResult } from "./vault";
 import { FileChange, FileStates } from "./util/changeTracking";
 import { BlobSha, CommitSha, EMPTY_TREE_SHA, TreeSha } from "./util/hashing";
 import { Content, FileContent } from "./util/contentEncoding";
@@ -476,8 +476,8 @@ export class RemoteGitHubVault implements IRemoteVault {
 	/**
 	 * Create a commit pointing to a tree
 	 */
-	public async createCommit(treeSha: TreeSha, parentSha: CommitSha): Promise<CommitSha> {
-		const message = `Commit from ${this.deviceName} on ${new Date().toLocaleString()}`;
+	public async createCommit(treeSha: TreeSha, parentSha: CommitSha, commitMessage?: string): Promise<CommitSha> {
+		const message = commitMessage?.trim() || `Commit from ${this.deviceName} on ${new Date().toLocaleString()}`;
 		try {
 			const { data: createdCommit } = await this.octokit.request(
 				`POST /repos/{owner}/{repo}/git/commits`, {
@@ -557,7 +557,7 @@ export class RemoteGitHubVault implements IRemoteVault {
 	async applyChanges(
 		filesToWrite: Array<{path: string, content: FileContent}>,
 		filesToDelete: Array<string>,
-		_options?: { clashPaths?: Set<string> }
+		options?: ApplyChangesOptions
 	): Promise<ApplyChangesResult<"remote">> {
 		// Note: clashPaths is ignored - remote doesn't have _fit/ directory concept
 		// Get current state using cache when available
@@ -700,7 +700,7 @@ export class RemoteGitHubVault implements IRemoteVault {
 
 		// Create tree, commit, and update ref
 		const { treeSha: newTreeSha, userWarning } = await this.createTree(treeNodes, parentTreeSha);
-		const newCommitSha = await this.createCommit(newTreeSha, parentCommitSha);
+		const newCommitSha = await this.createCommit(newTreeSha, parentCommitSha, options?.commitMessage);
 		await this.updateRef(newCommitSha);
 
 		// Build file operation records and construct new state from known changes

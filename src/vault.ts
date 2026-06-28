@@ -74,6 +74,13 @@ export type ApplyChangesResult<T extends VaultCategory> =
 		userWarning?: string;
 	} & ApplyChangesResultMap[T];
 
+export type ApplyChangesOptions = {
+	/** For LocalVault: writes these original paths to `_fit/{path}`. */
+	clashPaths?: Set<string>;
+	/** For remote vaults: overrides the generated commit message when supported. */
+	commitMessage?: string;
+};
+
 // ===== Vault Error Types =====
 
 export type VaultErrorType =
@@ -213,7 +220,7 @@ export interface IVault<T extends VaultCategory> {
 	applyChanges(
 		filesToWrite: Array<{path: string, content: FileContent}>,
 		filesToDelete: Array<string>,
-		options?: { clashPaths?: Set<string> }
+		options?: ApplyChangesOptions
 	): Promise<ApplyChangesResult<T>>;
 
 	// ===== Metadata =====

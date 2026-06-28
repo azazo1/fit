@@ -145,7 +145,7 @@ const content = await vault.adapter.readBinary('.hidden');  // Reads successfull
 **When to use adapter APIs:**
 - Reading files that may not be in Obsidian's index (e.g., hidden files for baseline SHA comparison)
 - Checking file existence on filesystem independent of Obsidian's tracking
-- Implementing Git-compatible path filtering without calling a system `git` binary
+- Implementing Git-compatible path filtering without calling a system `git` binary. Repository-local rules like `.git/info/exclude` can be read through the vault adapter, but user-global excludes outside the vault are intentionally unsupported.
 
 **Best practice:** Try indexed read first (faster), fall back to adapter:
 

@@ -1113,6 +1113,21 @@ describe('LocalVault', () => {
 			expect(Object.keys(state).sort()).toEqual(['README.md', 'src/main.ts']);
 		});
 
+		it('should exclude files matched by .git/info/exclude in git-compatible path mode', async () => {
+			const fakeVault = new FakeObsidianVault();
+
+			await fakeVault.adapter.write('.git/info/exclude', '*.local\n!important.local');
+			await fakeVault.create('cache.local', 'cache');
+			await fakeVault.create('important.local', 'important');
+			await fakeVault.create('note.md', 'note');
+
+			const localVault = new LocalVault(fakeVault as any);
+			localVault.configure({ pathFilterMode: 'git', syncHiddenFiles: false });
+			const { state } = await localVault.readFromSource();
+
+			expect(Object.keys(state).sort()).toEqual(['important.local', 'note.md']);
+		});
+
 		it('should exclude files matched by nested .gitignore', async () => {
 			const fakeVault = new FakeObsidianVault();
 

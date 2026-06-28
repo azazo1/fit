@@ -1,5 +1,6 @@
 import { Plugin, SettingTab } from 'obsidian';
 import { FitStatusModal } from '@/fitStatusModal';
+import { ManualSyncModal } from '@/manualSyncModal';
 import { renderExplanation, type AutoSyncInfo } from '@/fitStatusExplainer';
 import { Fit } from '@/fit';
 import FitNotice from '@/fitNotice';
@@ -374,7 +375,14 @@ export default class FitPlugin extends Plugin {
 	 * Entry point: User clicks ribbon icon or uses command palette
 	 */
 	triggerManualSync = async (): Promise<void> => {
-		await this.executeSyncWithUICoordination('manual');
+		await this.openManualSyncWorkspace();
+	};
+
+	private openManualSyncWorkspace = async (): Promise<void> => {
+		if (!this.checkSettingsConfigured()) return;
+		await this.loadLocalStore();
+		this.fit.loadLocalStore(this.localStore);
+		new ManualSyncModal(this.app, this.fitSync).open();
 	};
 
 	private async explainSyncStatus(): Promise<void> {
@@ -399,8 +407,7 @@ export default class FitPlugin extends Plugin {
 	}
 
 	loadRibbonIcons() {
-		// Pull from remote then Push to remote if no clashing changes detected during pull
-		this.fitSyncRibbonIconEl = this.addRibbonIcon('github', 'Sync to remote', this.triggerManualSync);
+		this.fitSyncRibbonIconEl = this.addRibbonIcon('github', 'Manual sync', this.triggerManualSync);
 		this.fitSyncRibbonIconEl.addClass('fit-sync-ribbon-el');
 	}
 
@@ -461,7 +468,7 @@ export default class FitPlugin extends Plugin {
 			// Add command to command palette for fit sync
 			this.addCommand({
 				id: 'fit-sync',
-				name: 'Fit Sync',
+				name: 'Manual Sync',
 				callback: this.triggerManualSync
 			});
 

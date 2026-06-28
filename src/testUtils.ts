@@ -4,13 +4,14 @@
 
 import { TFile } from 'obsidian';
 import { TreeNode } from './remoteGitHubVault';
-import { ApplyChangesResult, IVault, VaultError, VaultReadResult } from './vault';
+import { ApplyChangesOptions, ApplyChangesResult, IVault, VaultError, VaultReadResult } from './vault';
 import { FileChange, FileStates } from "./util/changeTracking";
 import { FileContent, Base64Content, PlainTextContent } from './util/contentEncoding';
 import { FilePath } from './util/filePath';
 import { BlobSha, CommitSha, computeSha1, TreeSha } from "./util/hashing";
 import { LocalVault } from './localVault';
 import { fitLogger } from './logger';
+import { PathFilterMode } from './fitSettings';
 
 /**
  * Test stub for TFile that can be constructed with just a path.
@@ -257,6 +258,10 @@ export class FakeOctokit {
 		return this.refs.get(`heads/${this.branch}`);
 	}
 
+	getCommitMessage(commitSha: CommitSha): string | undefined {
+		return this.commits.get(commitSha)?.message;
+	}
+
 	/**
 	 * Octokit request method - routes requests to appropriate handlers.
 	 */
@@ -410,8 +415,17 @@ export class FakeLocalVault implements IVault<"local"> {
 	private failureScenarios: Map<FailureScenario, Error> = new Map();
 	private statLog: string[] = []; // Track all stat operations for performance testing
 	private mockWriteFile: ((path: string) => Promise<void>) | null = null; // Mock for writeFile operations
+	private syncHiddenFiles = false;
+	private pathFilterMode: PathFilterMode = "fit";
 
-	configure(): void {}
+	configure(opts?: { syncHiddenFiles?: boolean; pathFilterMode?: PathFilterMode }): void {
+		if (opts?.syncHiddenFiles !== undefined) {
+			this.syncHiddenFiles = opts.syncHiddenFiles;
+		}
+		if (opts?.pathFilterMode !== undefined) {
+			this.pathFilterMode = opts.pathFilterMode;
+		}
+	}
 
 	/**
 	 * Configure the vault to fail on a specific operation.
@@ -616,7 +630,7 @@ export class FakeLocalVault implements IVault<"local"> {
 	async applyChanges(
 		filesToWrite: Array<{path: string, content: FileContent}>,
 		filesToDelete: Array<string>,
-		options?: { clashPaths?: Set<string> }
+		options?: ApplyChangesOptions
 	): Promise<ApplyChangesResult<"local">> {
 		const clashPaths = options?.clashPaths ?? new Set();
 		const error = this.failureScenarios.get('write');
@@ -751,9 +765,11 @@ export class FakeLocalVault implements IVault<"local"> {
 	}
 
 	shouldTrackState(path: string): boolean {
-		// Exclude hidden files (same as LocalVault)
+		if (this.pathFilterMode === "git") {
+			return true;
+		}
 		const parts = path.split('/');
-		return !parts.some(part => part.startsWith('.'));
+		return this.syncHiddenFiles || !parts.some(part => part.startsWith('.'));
 	}
 }
 
@@ -771,6 +787,7 @@ export class FakeRemoteVault implements IVault<"remote"> {
 	private owner: string;
 	private repo: string;
 	private branch: string;
+	lastCommitMessage: string | undefined;
 
 	constructor(owner: string, repo: string, branch: string) {
 		this.owner = owner;
@@ -930,7 +947,7 @@ export class FakeRemoteVault implements IVault<"remote"> {
 	async applyChanges(
 		filesToWrite: Array<{path: string, content: FileContent}>,
 		filesToDelete: Array<string>,
-		_options?: { clashPaths?: Set<string> }
+		options?: ApplyChangesOptions
 	): Promise<ApplyChangesResult<"remote">> {
 		if (this.failureError) {
 			const error = this.failureError;
@@ -941,6 +958,7 @@ export class FakeRemoteVault implements IVault<"remote"> {
 		const changes: FileChange[] = [];
 		const skippedPaths: string[] = [];
 		const rateLimitedPaths: string[] = [];
+		this.lastCommitMessage = options?.commitMessage;
 
 		for (const file of filesToWrite) {
 			if (this._skippedPaths.has(file.path)) {

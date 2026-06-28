@@ -1,6 +1,9 @@
 import ignore, { Ignore } from "ignore";
 import { DataAdapter } from "obsidian";
 
+const ROOT_IGNORE_PATH = ".gitignore";
+const GIT_INFO_EXCLUDE_PATH = ".git/info/exclude";
+
 export class GitignoreFilter {
 	private constructor(private readonly filters: Map<string, Ignore>) {}
 
@@ -66,7 +69,8 @@ export class GitignoreFilter {
 
 function deriveGitignorePaths(filePaths: string[]): Set<string> {
 	const gitignorePaths = new Set<string>();
-	gitignorePaths.add('.gitignore');
+	gitignorePaths.add(ROOT_IGNORE_PATH);
+	gitignorePaths.add(GIT_INFO_EXCLUDE_PATH);
 
 	for (const filePath of filePaths) {
 		const parts = filePath.split('/');
@@ -96,10 +100,12 @@ async function loadFilters(
 				}
 
 				const content = await adapter.read(gitignorePath);
-				const dirPath = gitignorePath === '.gitignore'
+				const dirPath = gitignorePath === ROOT_IGNORE_PATH || gitignorePath === GIT_INFO_EXCLUDE_PATH
 					? ''
 					: gitignorePath.replace(/\/.gitignore$/, '');
-				filters.set(dirPath, ignore().add(content));
+				const existing = filters.get(dirPath) ?? ignore();
+				existing.add(content);
+				filters.set(dirPath, existing);
 			} catch {
 				// file doesn't exist or unreadable — skip
 			}

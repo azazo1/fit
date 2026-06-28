@@ -141,6 +141,17 @@ A path is **pending** when it has an unresolved `_fit/` copy — the user has no
 
 ## Change Detection
 
+### Manual Sync
+
+Manual Sync uses the same local and remote change detection as the automatic sync workflow, then presents the safe local and safe remote changes for user selection.
+
+- Selected local changes are pushed through the active remote provider API with the user-provided commit message.
+- Selected remote changes are pulled to the local vault.
+- Unselected paths keep their previous baseline entries, so they remain pending for the next scan.
+- Conflicts, protected paths, and untracked safety cases are shown separately and are not applied directly.
+
+This is not a local Git index and does not call `git add`, `git commit`, or `git push`. FIT must keep working on Obsidian mobile, so commit creation is performed through GitHub or Forgejo/Gitea APIs.
+
 ### 💾 Local Change Detection
 
 FIT compares current local file SHAs against the cached `localShas` to detect changes since the last sync.
@@ -339,8 +350,10 @@ Git internals are a special case: `.gitignore` is a normal hidden file, but any 
 
 **How it works:**
 - Reads `.gitignore` files from the vault root and any ancestor directories of tracked files
+- Reads repository-local `.git/info/exclude` as root-scoped ignore rules when that file is accessible through the Obsidian adapter
 - Uses the `ignore` package for standard gitignore pattern semantics (negation, directory patterns, etc.)
 - Only probes paths derived from the tracked file set — no full filesystem scan
+- Does not read user-global Git excludes such as `core.excludesFile` or `~/.config/git/ignore`, because FIT cannot call `git config` or safely read files outside the vault on Obsidian mobile
 
 **Behavior:**
 - Files matched by any applicable `.gitignore` are excluded from `localShas` and never pushed

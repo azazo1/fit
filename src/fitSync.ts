@@ -63,16 +63,36 @@ function dropAlreadySyncedChanges(
 	const alreadySynced: FileStates = {};
 	const alreadyGone = new Set<string>();
 	const remoteChangesByPath = new Map(remoteChanges.map(change => [change.path, change]));
+	const localChangesByPath = new Map(localChanges.map(change => [change.path, change]));
 
 	for (const localChange of localChanges) {
 		const remoteChange = remoteChangesByPath.get(localChange.path);
-		if (!remoteChange) continue;
 		const localSha = currentLocalState[localChange.path];
 		const remoteSha = remoteTreeSha[localChange.path];
 		if (localSha && remoteSha && localSha === remoteSha) {
 			alreadySynced[localChange.path] = localSha;
+			continue;
+		}
+		if (!localSha && !remoteSha && localChange.type === "REMOVED") {
+			alreadyGone.add(localChange.path);
+			continue;
+		}
+		if (!remoteChange) continue;
+		if (localSha && remoteSha && localSha === remoteSha) {
+			alreadySynced[localChange.path] = localSha;
 		} else if (!localSha && !remoteSha && localChange.type === "REMOVED" && remoteChange.type === "REMOVED") {
 			alreadyGone.add(localChange.path);
+		}
+	}
+
+	for (const remoteChange of remoteChanges) {
+		if (localChangesByPath.has(remoteChange.path)) continue;
+		const localSha = currentLocalState[remoteChange.path];
+		const remoteSha = remoteTreeSha[remoteChange.path];
+		if (localSha && remoteSha && localSha === remoteSha) {
+			alreadySynced[remoteChange.path] = localSha;
+		} else if (!localSha && !remoteSha && remoteChange.type === "REMOVED") {
+			alreadyGone.add(remoteChange.path);
 		}
 	}
 
@@ -121,6 +141,28 @@ type SyncExecutionResult = {
 	skippedWarning?: string;
 	/** Paths not uploaded due to a transient failure (localShas cleared so they retry next sync) */
 	rateLimitedPaths: string[];
+};
+
+export type ManualSyncPreview = {
+	localChanges: FileChange[];
+	remoteChanges: FileChange[];
+	safeLocal: FileChange[];
+	safeRemote: FileChange[];
+	clashes: FileClash[];
+	localState: FileStates;
+	remoteState: FileStates;
+	remoteCommitSha: CommitSha;
+};
+
+type ManualSyncSnapshot = {
+	currentLocalState: FileStates;
+	remoteChanges: FileChange[];
+	remoteTreeSha: FileStates;
+	remoteCommitSha: CommitSha;
+	safeLocal: FileChange[];
+	safeRemote: FileChange[];
+	clashes: FileClash[];
+	existenceMap: Map<string, "file" | "folder" | "nonexistent">;
 };
 
 export type ConflictResolutionResult = {
@@ -667,12 +709,12 @@ export class FitSync implements IFitSync {
 
 		// Clean stale unpushedFiles entries before persisting.
 		// A file leaves the list when: locally modified (SHA changed → re-enters normal sync),
-		// reconciled on remote (remote change detected → normal pull handles it), deleted
-		// locally, or excluded by shouldSyncPath (e.g. added to .gitignore).
+		// reconciled on remote (remote change detected or already-synced adoption handles it),
+		// deleted locally, or excluded by shouldSyncPath (e.g. added to .gitignore).
 		const remoteChangesForCleanup = remoteUpdate.remoteChanges ?? [];
 		for (const [path, sha] of Object.entries(this.fit.unpushedFiles)) {
 			const isModified = newLocalState[path] !== sha;
-			const isRemoteReconciled = remoteChangesForCleanup.some(c => c.path === path);
+			const isRemoteReconciled = remoteChangesForCleanup.some(c => c.path === path) || alreadySynced[path] !== undefined;
 			const isGone = newLocalState[path] === undefined;
 			const isIgnored = !this.fit.shouldSyncPath(path);
 			if (isModified || isRemoteReconciled || isGone || isIgnored) {
@@ -703,6 +745,220 @@ export class FitSync implements IFitSync {
 			skippedWarning: pushResult?.skippedWarning,
 			rateLimitedPaths,
 		};
+	}
+
+	private async prepareManualSnapshot(): Promise<ManualSyncSnapshot> {
+		const [{ changes: localChanges, state: currentLocalState }, remoteResult] = await Promise.all([
+			this.fit.getLocalChanges(),
+			this.fit.getRemoteChanges(),
+		]);
+		const { localChanges: normalizedLocalChanges, remoteChanges, alreadySynced } = dropAlreadySyncedChanges(
+			localChanges,
+			remoteResult.changes,
+			currentLocalState,
+			remoteResult.state
+		);
+		if (Object.keys(alreadySynced).length > 0) {
+			fitLogger.log('[ManualSync] Skipping already-synced changes', {
+				count: Object.keys(alreadySynced).length,
+				paths: Object.keys(alreadySynced),
+			});
+			await this.saveLocalStoreCallback({
+				localShas: this.fit.filterSyncedState({
+					...this.fit.localShas,
+					...alreadySynced,
+				}),
+				lastFetchedRemoteShas: {
+					...this.fit.lastFetchedRemoteShas,
+					...alreadySynced,
+				},
+				lastFetchedCommitSha: remoteResult.commitSha,
+				unpushedFiles: this.fit.unpushedFiles,
+				pendingClashes: this.fit.pendingClashes,
+				localSha: Object.keys(this.fit.localSha).length > 0 ? this.fit.localSha : undefined,
+			});
+		}
+
+		const { safeLocal, safeRemote, clashes, existenceMap } = await this.compareAndResolveChanges(
+			normalizedLocalChanges,
+			remoteChanges,
+			new Set(Object.keys(currentLocalState)),
+			new Set(Object.keys(remoteResult.state))
+		);
+
+		return {
+			currentLocalState,
+			remoteChanges,
+			remoteTreeSha: remoteResult.state,
+			remoteCommitSha: remoteResult.commitSha,
+			safeLocal,
+			safeRemote,
+			clashes,
+			existenceMap,
+		};
+	}
+
+	async previewManualSync(): Promise<ManualSyncPreview> {
+		const snapshot = await this.prepareManualSnapshot();
+		return {
+			localChanges: [...snapshot.safeLocal, ...snapshot.clashes
+				.filter(clash => clash.localState !== 'protected' && clash.localState !== 'untracked' && clash.localState !== 'pending')
+				.map(clash => ({ path: clash.path, type: clash.localState as FileChange["type"] }))],
+			remoteChanges: [...snapshot.safeRemote, ...snapshot.clashes.map(clash => ({ path: clash.path, type: clash.remoteOp }))],
+			safeLocal: snapshot.safeLocal,
+			safeRemote: snapshot.safeRemote,
+			clashes: snapshot.clashes,
+			localState: snapshot.currentLocalState,
+			remoteState: snapshot.remoteTreeSha,
+			remoteCommitSha: snapshot.remoteCommitSha,
+		};
+	}
+
+	async pushManualSelection(paths: string[], commitMessage: string): Promise<SyncResult> {
+		if (this.syncPromise) {
+			return { success: false, error: SyncErrors.alreadySyncing() };
+		}
+		this.syncPromise = this._pushManualSelection(paths, commitMessage).finally(() => { this.syncPromise = null; });
+		return this.syncPromise;
+	}
+
+	private async _pushManualSelection(paths: string[], commitMessage: string): Promise<SyncResult> {
+		try {
+			const selected = new Set(paths);
+			const snapshot = await this.prepareManualSnapshot();
+			const safeLocal = snapshot.safeLocal.filter(change => selected.has(change.path));
+			if (safeLocal.length === 0) {
+				return { success: true, changeGroups: [{ heading: "Remote file updates:", changes: [] }], clash: snapshot.clashes };
+			}
+
+			const pushResult = await this.pushChangedFilesToRemote(
+				{
+					localChanges: safeLocal,
+					parentCommitSha: snapshot.remoteCommitSha,
+					commitMessage,
+				},
+				snapshot.existenceMap
+			);
+
+			const pushedChanges = pushResult?.pushedChanges ?? [];
+			if (pushResult?.skippedPaths?.length) {
+				for (const path of pushResult.skippedPaths) {
+					if (snapshot.currentLocalState[path]) {
+						this.fit.unpushedFiles[path] = snapshot.currentLocalState[path];
+					}
+				}
+			}
+
+			const newLocalState = { ...this.fit.localShas };
+			for (const change of pushedChanges) {
+				if (change.type === "REMOVED") {
+					delete newLocalState[change.path];
+				} else if (snapshot.currentLocalState[change.path]) {
+					newLocalState[change.path] = snapshot.currentLocalState[change.path];
+				}
+			}
+			const newRemoteState = { ...this.fit.lastFetchedRemoteShas };
+			if (pushResult) {
+				for (const change of pushedChanges) {
+					if (change.type === "REMOVED") {
+						delete newRemoteState[change.path];
+					} else if (pushResult.lastFetchedRemoteShas[change.path]) {
+						newRemoteState[change.path] = pushResult.lastFetchedRemoteShas[change.path];
+					}
+				}
+			}
+
+			await this.saveLocalStoreCallback({
+				localShas: this.fit.filterSyncedState(newLocalState),
+				lastFetchedRemoteShas: newRemoteState,
+				lastFetchedCommitSha: pushResult?.lastFetchedCommitSha ?? snapshot.remoteCommitSha,
+				unpushedFiles: this.fit.unpushedFiles,
+				pendingClashes: this.fit.pendingClashes,
+				localSha: Object.keys(this.fit.localSha).length > 0 ? this.fit.localSha : undefined,
+			});
+
+			return {
+				success: true,
+				changeGroups: [{ heading: "Remote file updates:", changes: pushedChanges }],
+				clash: snapshot.clashes,
+			};
+		} catch (error) {
+			if (error instanceof VaultError) {
+				return { success: false, error };
+			}
+			return { success: false, error: SyncErrors.unknown(error instanceof Error ? String(error) : String(error), { originalError: error }) };
+		}
+	}
+
+	async pullManualSelection(paths: string[]): Promise<SyncResult> {
+		if (this.syncPromise) {
+			return { success: false, error: SyncErrors.alreadySyncing() };
+		}
+		this.syncPromise = this._pullManualSelection(paths).finally(() => { this.syncPromise = null; });
+		return this.syncPromise;
+	}
+
+	private async _pullManualSelection(paths: string[]): Promise<SyncResult> {
+		try {
+			const selected = new Set(paths);
+			const snapshot = await this.prepareManualSnapshot();
+			const safeRemote = snapshot.safeRemote.filter(change => selected.has(change.path));
+			if (safeRemote.length === 0) {
+				return { success: true, changeGroups: [{ heading: "Local file updates:", changes: [] }], clash: snapshot.clashes };
+			}
+
+			const deleteFromLocal = safeRemote.filter(change => change.type === "REMOVED").map(change => change.path);
+			const filesToWrite = await Promise.all(
+				safeRemote
+					.filter(change => change.type !== "REMOVED")
+					.map(async change => ({
+						path: change.path,
+						content: await this.fit.remoteVault.readFileContent(change.path),
+					}))
+			);
+			const localResult = await this.applyRemoteChanges(
+				filesToWrite,
+				deleteFromLocal,
+				[],
+				snapshot.existenceMap,
+				{ setMessage: (message: string) => fitLogger.log('[ManualSync] ' + message) } as FitNotice
+			);
+			const newBaselineShas = await localResult.newBaselineStates;
+
+			const newLocalState = { ...this.fit.localShas, ...newBaselineShas };
+			for (const path of deleteFromLocal) {
+				delete newLocalState[path];
+			}
+			const newRemoteState = { ...this.fit.lastFetchedRemoteShas };
+			for (const change of localResult.changes) {
+				const originalPath = change.path.startsWith("_fit/") ? change.path.slice("_fit/".length) : change.path;
+				if (change.type === "REMOVED") {
+					delete newRemoteState[originalPath];
+				} else if (snapshot.remoteTreeSha[originalPath]) {
+					newRemoteState[originalPath] = snapshot.remoteTreeSha[originalPath];
+				}
+			}
+
+			await this.saveLocalStoreCallback({
+				localShas: this.fit.filterSyncedState(newLocalState),
+				lastFetchedRemoteShas: newRemoteState,
+				lastFetchedCommitSha: snapshot.remoteCommitSha,
+				unpushedFiles: this.fit.unpushedFiles,
+				pendingClashes: this.fit.pendingClashes,
+				localSha: Object.keys(this.fit.localSha).length > 0 ? this.fit.localSha : undefined,
+			});
+
+			return {
+				success: true,
+				changeGroups: [{ heading: "Local file updates:", changes: localResult.changes }],
+				clash: snapshot.clashes,
+			};
+		} catch (error) {
+			if (error instanceof VaultError) {
+				return { success: false, error };
+			}
+			return { success: false, error: SyncErrors.unknown(error instanceof Error ? String(error) : String(error), { originalError: error }) };
+		}
 	}
 
 	async sync(syncNotice: FitNotice, options?: { isAutoSync?: boolean }): Promise<SyncResult> {
@@ -1038,7 +1294,8 @@ export class FitSync implements IFitSync {
 	private async pushChangedFilesToRemote(
 		localUpdate: {
 			localChanges: FileChange[],
-			parentCommitSha: CommitSha
+			parentCommitSha: CommitSha,
+			commitMessage?: string,
 		},
 		existenceMap: Map<string, 'file' | 'folder' | 'nonexistent'>
 	): Promise<{pushedChanges: FileChange[], lastFetchedRemoteShas: FileStates, lastFetchedCommitSha: CommitSha, skippedPaths?: string[], skippedWarning?: string, rateLimitedPaths?: string[]}|null> {
@@ -1075,7 +1332,10 @@ export class FitSync implements IFitSync {
 			}
 		}
 
-		const result = await this.fit.remoteVault.applyChanges(filesToWrite, filesToDelete, { clashPaths: new Set() });
+		const result = await this.fit.remoteVault.applyChanges(filesToWrite, filesToDelete, {
+			clashPaths: new Set(),
+			commitMessage: localUpdate.commitMessage,
+		});
 
 		// Show user warning if encoding issues detected during upload
 		if (result.userWarning) {

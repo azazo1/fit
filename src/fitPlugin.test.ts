@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, type Mock, beforeEach } from 'vitest';
 import FitPlugin from '@/fitPlugin';
 import { FitStatusModal } from '@/fitStatusModal';
+import { ManualSyncModal } from '@/manualSyncModal';
 import type { LocalStores } from '@/localStores';
 import type { BlobSha } from '@/util/hashing';
 
@@ -12,6 +13,16 @@ vi.mock('@/fitStatusModal', () => ({
 	) {
 		this.open = vi.fn();
 		this.renderable = renderable;
+	})
+}));
+
+vi.mock('@/manualSyncModal', () => ({
+	ManualSyncModal: vi.fn().mockImplementation(function(
+		this: { open: ReturnType<typeof vi.fn> },
+		_app: unknown,
+		_fitSync: unknown
+	) {
+		this.open = vi.fn();
 	})
 }));
 
@@ -202,6 +213,38 @@ describe('FitPlugin persistence lifecycle', () => {
 			await plugin.loadLocalStore();
 			expect(plugin.localStore.lastFetchedRemoteShas).toEqual({ 'file.md': 'oldsha' });
 		});
+	});
+});
+
+describe('FitPlugin command registration', () => {
+	it('routes the existing sync command to manual sync', async () => {
+		const plugin = makePlugin();
+		mockLoad(plugin, {});
+		plugin.loadLocalStore = vi.fn().mockResolvedValue(undefined) as any;
+		(plugin as any).updateRemoteConnection = vi.fn();
+		plugin.loadRibbonIcons = vi.fn() as any;
+		plugin.startOrUpdateAutoSyncInterval = vi.fn().mockResolvedValue(undefined) as any;
+		plugin.fit = { loadLocalStore: vi.fn(), loadSettings: vi.fn() } as any;
+		plugin.localStore = {
+			localShas: {},
+			lastFetchedRemoteShas: {},
+			lastFetchedCommitSha: null,
+			unpushedFiles: {},
+			pendingClashes: [],
+		};
+		plugin.app = { vault: {} } as any;
+		plugin.manifest = { id: 'fit', dir: '.obsidian/plugins/fit' } as any;
+
+		await plugin.onload();
+
+		expect(plugin.addCommand).toHaveBeenCalledWith(expect.objectContaining({
+			id: 'fit-sync',
+			name: 'Manual Sync',
+		}));
+		expect(plugin.addCommand).not.toHaveBeenCalledWith(expect.objectContaining({
+			id: 'fit-manual-sync',
+		}));
+		expect(ManualSyncModal).not.toHaveBeenCalled();
 	});
 });
 

@@ -1217,7 +1217,7 @@ describe('FitSync', () => {
 				'[FitSync] Couldn\'t check if some paths exist locally - conservatively treating as clash',
 				{
 					error: statError,
-					deletionsSkipped: ['.editorconfig'] // Untracked files with baselines are protected from deletion
+					deletionsSkipped: []
 				}
 			);
 		});
@@ -2578,6 +2578,89 @@ describe('FitSync', () => {
 				expect(result).toEqual(expect.objectContaining({ success: true }));
 				expect(remoteVault.getAllFilesAsRaw()).toMatchObject({ 'note.md': content });
 			});
+		});
+	});
+
+	describe('Manual sync', () => {
+		it('previews safe local, safe remote, and clashing changes', async () => {
+			localVault.setFile('local.md', 'local');
+			remoteVault.setFile('remote.md', 'remote');
+			localVault.setFile('both.md', 'local');
+			remoteVault.setFile('both.md', 'remote');
+
+			const fitSync = createFitSync();
+			const preview = await fitSync.previewManualSync();
+
+			expect(preview.safeLocal).toEqual(expect.arrayContaining([
+				{ path: 'local.md', type: 'ADDED' },
+			]));
+			expect(preview.safeRemote).toEqual(expect.arrayContaining([
+				{ path: 'remote.md', type: 'ADDED' },
+			]));
+			expect(preview.clashes).toEqual(expect.arrayContaining([
+				{ path: 'both.md', localState: 'ADDED', remoteOp: 'ADDED' },
+			]));
+		});
+
+		it('adopts matching .obsidian entries in git-compatible path mode', async () => {
+			const sharedPath = '.obsidian/app.json';
+			const sharedContent = '{"theme":"dark"}';
+			localVault.setFile(sharedPath, sharedContent);
+			await remoteVault.setFile(sharedPath, sharedContent);
+			const remoteState = await remoteVault.readFromSource();
+			localStoreState = makeLocalStore({
+				localShas: {},
+				lastFetchedRemoteShas: { [sharedPath]: remoteState.state[sharedPath] },
+				lastFetchedCommitSha: remoteState.commitSha,
+			});
+
+			const fitSync = createFitSync();
+			fitSync.fit.loadSettings({
+				...testSettings,
+				pathFilterMode: 'git',
+				syncHiddenFiles: false,
+				obsidianSyncRules: {},
+			} as FitSettings);
+			fitSync.fit.remoteVault = remoteVault as any;
+
+			const preview = await fitSync.previewManualSync();
+
+			expect(preview.safeLocal).not.toContainEqual(expect.objectContaining({ path: sharedPath }));
+			expect(preview.safeRemote).not.toContainEqual(expect.objectContaining({ path: sharedPath }));
+			expect(preview.clashes).not.toContainEqual(expect.objectContaining({ path: sharedPath }));
+			expect(localStoreState.localShas[sharedPath]).toBe(remoteState.state[sharedPath]);
+			expect(localStoreState.lastFetchedRemoteShas[sharedPath]).toBe(remoteState.state[sharedPath]);
+		});
+
+		it('pushes only selected local changes with custom commit message', async () => {
+			localVault.setFile('push.md', 'push');
+			localVault.setFile('skip.md', 'skip');
+
+			const fitSync = createFitSync();
+			const result = await fitSync.pushManualSelection(['push.md'], 'Manual vault update');
+
+			expect(result).toMatchObject({ success: true });
+			expect(remoteVault.getAllFilesAsRaw()).toEqual({ 'push.md': 'push' });
+			expect(remoteVault.lastCommitMessage).toBe('Manual vault update');
+			expect(localStoreState.localShas['push.md']).toBeDefined();
+			expect(localStoreState.localShas['skip.md']).toBeUndefined();
+			expect(localStoreState.lastFetchedRemoteShas['push.md']).toBeDefined();
+			expect(localStoreState.lastFetchedRemoteShas['skip.md']).toBeUndefined();
+		});
+
+		it('pulls only selected remote changes', async () => {
+			remoteVault.setFile('pull.md', 'pull');
+			remoteVault.setFile('skip.md', 'skip');
+
+			const fitSync = createFitSync();
+			const result = await fitSync.pullManualSelection(['pull.md']);
+
+			expect(result).toMatchObject({ success: true });
+			expect(localVault.getAllFilesAsRaw()).toEqual({ 'pull.md': 'pull' });
+			expect(localStoreState.localShas['pull.md']).toBeDefined();
+			expect(localStoreState.localShas['skip.md']).toBeUndefined();
+			expect(localStoreState.lastFetchedRemoteShas['pull.md']).toBeDefined();
+			expect(localStoreState.lastFetchedRemoteShas['skip.md']).toBeUndefined();
 		});
 	});
 });

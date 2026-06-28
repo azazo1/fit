@@ -294,6 +294,18 @@ describe("RemoteGitHubVault", () => {
 				]));
 			});
 
+			it("should use custom commit message when provided", async () => {
+				fakeOctokit.setupInitialState(PARENTCOMMIT123_SHA, TREE456_SHA, []);
+
+				const result = await vault.applyChanges(
+					[{ path: "newfile.md", content: FileContent.fromPlainText("Hello World") }],
+					[],
+					{ commitMessage: "Manual vault update" }
+				);
+
+				expect(fakeOctokit.getCommitMessage(result.commitSha)).toBe("Manual vault update");
+			});
+
 			it("should handle file modifications", async () => {
 				const mockTree: TreeNode[] = [
 					{ path: "existing.md", type: "blob", mode: "100644", sha: "oldblob" as BlobSha }

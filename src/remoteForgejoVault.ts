@@ -1,5 +1,5 @@
 import { LocalStores } from "@/localStores";
-import { ApplyChangesResult, IRemoteVault, VaultError, VaultReadResult } from "./vault";
+import { ApplyChangesOptions, ApplyChangesResult, IRemoteVault, VaultError, VaultReadResult } from "./vault";
 import { FileChange, FileStates } from "./util/changeTracking";
 import { BlobSha, CommitSha, EMPTY_TREE_SHA, TreeSha } from "./util/hashing";
 import { FileContent } from "./util/contentEncoding";
@@ -13,7 +13,8 @@ import { forgejoRequest } from "./remotes/forgejoHttp";
 type ForgejoTreeNode = {
 	path?: string;
 	type?: string;
-	sha?: string;
+	sha?: string | null;
+	mode?: string;
 };
 
 type ForgejoBranchResponse = {
@@ -44,17 +45,26 @@ type ForgejoTreeResponse = {
 	tree?: ForgejoTreeNode[];
 };
 
+type ForgejoCreateTreeResponse = {
+	sha?: string;
+	tree?: ForgejoTreeNode[];
+};
+
+type ForgejoCreateCommitResponse = {
+	sha?: string;
+	id?: string;
+};
+
+type ForgejoUpdateRefResponse = {
+	object?: {
+		sha?: string;
+	};
+};
+
 type ForgejoBlobResponse = {
 	content?: string;
 	encoding?: string;
 	sha?: string;
-};
-
-type ForgejoFileChangeResponse = {
-	commit?: {
-		sha?: string;
-		id?: string;
-	};
 };
 
 type ForgejoContentsItem = {
@@ -170,19 +180,25 @@ export class RemoteForgejoVault implements IRemoteVault {
 	async applyChanges(
 		filesToWrite: Array<{path: string, content: FileContent}>,
 		filesToDelete: Array<string>,
-		_options?: { clashPaths?: Set<string> }
+		options?: ApplyChangesOptions
 	): Promise<ApplyChangesResult<"remote">> {
 		const { state: currentState, commitSha: parentCommitSha, treeSha: parentTreeSha } = await this.readFromSource();
 		const changes: FileChange[] = [];
-		let latestCommitSha = parentCommitSha;
+		const treeNodes: ForgejoTreeNode[] = [];
 
 		for (const { path, content } of filesToWrite) {
 			const remotePath = await this.toRemotePath(path);
-			const fileContent = await this.toRemoteContent(content);
+			const blobSha = await this.createBlob(await this.toRemoteContent(content));
+			if (currentState[path] === blobSha) {
+				continue;
+			}
 			const existed = currentState[path] !== undefined;
-			const contentPath = `/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/contents/${encodePath(remotePath)}`;
-			const response = await this.writeContent(path, contentPath, fileContent, currentState[path]);
-			latestCommitSha = this.extractCommitSha(response) ?? latestCommitSha;
+			treeNodes.push({
+				path: remotePath,
+				mode: "100644",
+				type: "blob",
+				sha: blobSha,
+			});
 			changes.push({ path, type: existed ? "MODIFIED" : "ADDED" });
 		}
 
@@ -191,20 +207,16 @@ export class RemoteForgejoVault implements IRemoteVault {
 				continue;
 			}
 			const remotePath = await this.toRemotePath(path);
-			const response = await this.request<ForgejoFileChangeResponse>(
-				"DELETE",
-				`/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/contents/${encodePath(remotePath)}`,
-				{
-					branch: this.branch,
-					message: this.commitMessage(),
-					sha: currentState[path],
-				}
-			);
-			latestCommitSha = this.extractCommitSha(response) ?? latestCommitSha;
+			treeNodes.push({
+				path: remotePath,
+				mode: "100644",
+				type: "blob",
+				sha: null,
+			});
 			changes.push({ path, type: "REMOVED" });
 		}
 
-		if (changes.length === 0) {
+		if (treeNodes.length === 0) {
 			return {
 				changes: [],
 				commitSha: parentCommitSha,
@@ -213,6 +225,9 @@ export class RemoteForgejoVault implements IRemoteVault {
 			};
 		}
 
+		const newTreeSha = await this.createTree(treeNodes, parentTreeSha);
+		const latestCommitSha = await this.createCommit(newTreeSha, parentCommitSha, options?.commitMessage);
+		await this.updateRef(latestCommitSha);
 		const fresh = await this.readFromSource(true);
 		return {
 			changes,
@@ -391,69 +406,63 @@ export class RemoteForgejoVault implements IRemoteVault {
 		return Encryption.isEnabled() ? await Encryption.encryptContent(base64) : base64;
 	}
 
-	private commitMessage(): string {
-		return `Commit from ${this.deviceName} on ${new Date().toLocaleString()}`;
-	}
-
-	private extractCommitSha(response: ForgejoFileChangeResponse): CommitSha | null {
-		const sha = response.commit?.sha ?? response.commit?.id;
-		return sha ? sha as CommitSha : null;
-	}
-
-	private async writeContent(
-		path: string,
-		contentPath: string,
-		fileContent: string,
-		knownSha?: string
-	): Promise<ForgejoFileChangeResponse> {
-		try {
-			return await this.request<ForgejoFileChangeResponse>(
-				knownSha ? "PUT" : "POST",
-				contentPath,
-				{
-					branch: this.branch,
-					content: fileContent,
-					message: this.commitMessage(),
-					...(knownSha && { sha: knownSha }),
-				}
-			);
-		} catch (error) {
-			if (!isForgejoFileExistsError(error) || knownSha) {
-				throw error;
+	private async createBlob(content: string): Promise<BlobSha> {
+		const response = await this.request<ForgejoBlobResponse>(
+			"POST",
+			`/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/git/blobs`,
+			{
+				content,
+				encoding: "base64",
 			}
-
-			const freshSha = await this.readExistingContentSha(contentPath) ??
-				(await this.readFromSource(true)).state[path];
-			if (!freshSha) {
-				throw error;
-			}
-
-			return await this.request<ForgejoFileChangeResponse>(
-				"PUT",
-				contentPath,
-				{
-					branch: this.branch,
-					content: fileContent,
-					message: this.commitMessage(),
-					sha: freshSha,
-				}
-			);
+		);
+		if (!response.sha) {
+			throw VaultError.network("Forgejo create blob response did not include sha");
 		}
+		return response.sha as BlobSha;
 	}
 
-	private async readExistingContentSha(contentPath: string): Promise<string | null> {
-		try {
-			const response = await this.request<ForgejoContentsResponse>("GET", this.withBranchRef(contentPath));
-			if (Array.isArray(response)) {
-				return null;
+	private async createTree(treeNodes: ForgejoTreeNode[], baseTreeSha: TreeSha): Promise<TreeSha> {
+		const response = await this.request<ForgejoCreateTreeResponse>(
+			"POST",
+			`/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/git/trees`,
+			{
+				base_tree: baseTreeSha,
+				tree: treeNodes,
 			}
-			if (response.type && response.type !== "file") {
-				return null;
-			}
-			return response.sha ?? null;
-		} catch {
-			return null;
+		);
+		if (!response.sha) {
+			throw VaultError.network("Forgejo create tree response did not include sha");
 		}
+		return response.sha as TreeSha;
+	}
+
+	private async createCommit(treeSha: TreeSha, parentCommitSha: CommitSha, commitMessage?: string): Promise<CommitSha> {
+		const response = await this.request<ForgejoCreateCommitResponse>(
+			"POST",
+			`/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/git/commits`,
+			{
+				message: this.commitMessage(commitMessage),
+				tree: treeSha,
+				parents: [parentCommitSha],
+			}
+		);
+		const sha = response.sha ?? response.id;
+		if (!sha) {
+			throw VaultError.network("Forgejo create commit response did not include sha");
+		}
+		return sha as CommitSha;
+	}
+
+	private async updateRef(commitSha: CommitSha): Promise<void> {
+		await this.request<ForgejoUpdateRefResponse>(
+			"PATCH",
+			`/repos/${encodeURIComponent(this.owner)}/${encodeURIComponent(this.repo)}/git/refs/heads/${encodeURIComponent(this.branch)}`,
+			{ sha: commitSha }
+		);
+	}
+
+	private commitMessage(commitMessage?: string): string {
+		return commitMessage?.trim() || `Commit from ${this.deviceName} on ${new Date().toLocaleString()}`;
 	}
 
 	private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -506,10 +515,4 @@ async function mapWithConcurrency<T, R>(
 		}
 	}));
 	return results;
-}
-
-function isForgejoFileExistsError(error: unknown): boolean {
-	return error instanceof VaultError &&
-		error.type === "network" &&
-		/repository file already exists|file already exists/i.test(error.message);
 }

@@ -42,7 +42,6 @@ function installForgejoFetchMock() {
 	let commitIndex = 1;
 	let currentCommit = "commit-1";
 	let currentTree = "tree-1";
-	let simulateAlreadyExistsForPath: string | null = null;
 	let hideAlreadyExistsPathFromTree = false;
 	let returnShallowRootTree = false;
 	let failContentsListing = false;
@@ -142,33 +141,39 @@ function installForgejoFetchMock() {
 				: jsonResponse(404, { message: "blob not found" });
 		}
 
-		if ((method === "POST" || method === "PUT") && apiPath.startsWith(`/repos/${OWNER}/${REPO}/contents/`)) {
-			const path = decodeURIComponent(apiPath.replace(`/repos/${OWNER}/${REPO}/contents/`, ""));
-			if (method === "POST" && simulateAlreadyExistsForPath === path) {
-				state.set(path, `remote-${path}-sha`);
-				blobs.set(`remote-${path}-sha`, "cmVtb3Rl");
-				commitIndex += 1;
-				currentCommit = `commit-${commitIndex}`;
-				currentTree = `tree-${commitIndex}`;
-				simulateAlreadyExistsForPath = null;
-				return jsonResponse(422, { message: `repository file already exists [path: ${path}]` });
-			}
-			const nextSha = `${path}-sha-${commitIndex + 1}`;
-			state.set(path, nextSha);
-			blobs.set(nextSha, body.content);
-			commitIndex += 1;
-			currentCommit = `commit-${commitIndex}`;
-			currentTree = `tree-${commitIndex}`;
-			return jsonResponse(200, { commit: { sha: currentCommit } });
+		if (method === "POST" && apiPath === `/repos/${OWNER}/${REPO}/git/blobs`) {
+			const sha = `blob-${blobs.size + 1}`;
+			blobs.set(sha, body.content);
+			return jsonResponse(200, { sha });
 		}
 
-		if (method === "DELETE" && apiPath.startsWith(`/repos/${OWNER}/${REPO}/contents/`)) {
-			const path = decodeURIComponent(apiPath.replace(`/repos/${OWNER}/${REPO}/contents/`, ""));
-			state.delete(path);
+		if (method === "POST" && apiPath === `/repos/${OWNER}/${REPO}/git/trees`) {
+			for (const node of body.tree ?? []) {
+				const path = node.path;
+				if (!path) continue;
+				if (node.sha === null) {
+					state.delete(path);
+				} else {
+					state.set(path, node.sha);
+				}
+			}
+			commitIndex += 1;
+			currentTree = `tree-${commitIndex}`;
+			return jsonResponse(200, {
+				sha: currentTree,
+				tree: body.tree ?? [],
+			});
+		}
+
+		if (method === "POST" && apiPath === `/repos/${OWNER}/${REPO}/git/commits`) {
 			commitIndex += 1;
 			currentCommit = `commit-${commitIndex}`;
-			currentTree = `tree-${commitIndex}`;
-			return jsonResponse(200, { commit: { sha: currentCommit } });
+			return jsonResponse(200, { sha: currentCommit });
+		}
+
+		if (method === "PATCH" && apiPath === `/repos/${OWNER}/${REPO}/git/refs/heads/${BRANCH}`) {
+			currentCommit = body.sha;
+			return jsonResponse(200, { object: { sha: currentCommit } });
 		}
 
 		return jsonResponse(500, { message: `Unhandled ${method} ${apiPath}` });
@@ -179,9 +184,6 @@ function installForgejoFetchMock() {
 		requestUrlMock,
 		state,
 		blobs,
-		simulateAlreadyExists(path: string) {
-			simulateAlreadyExistsForPath = path;
-		},
 		hideAlreadyExistsPathFromTree() {
 			hideAlreadyExistsPathFromTree = true;
 		},
@@ -249,7 +251,7 @@ describe("RemoteForgejoVault", () => {
 		expect(content).toEqual(FileContent.fromBase64("YWxwaGE="));
 	});
 
-	it("applies added, modified, and deleted files through contents API", async () => {
+	it("applies added, modified, and deleted files through git commit API", async () => {
 		const { requests, state, blobs } = installForgejoFetchMock();
 		state.set("notes/remove.md", "sha-remove");
 		blobs.set("sha-remove", "cmVtb3Zl");
@@ -269,12 +271,26 @@ describe("RemoteForgejoVault", () => {
 			{ path: "notes/remove.md", type: "REMOVED" },
 		]);
 		expect(result.newState).toEqual({
-			"notes/a.md": "notes/a.md-sha-2",
-			"notes/b.md": "notes/b.md-sha-3",
+			"notes/a.md": "blob-3",
+			"notes/b.md": "blob-4",
 		});
-		expect(requests.some(r => r.method === "PUT" && r.url.endsWith("/contents/notes/a.md"))).toBe(true);
-		expect(requests.some(r => r.method === "POST" && r.url.endsWith("/contents/notes/b.md"))).toBe(true);
-		expect(requests.some(r => r.method === "DELETE" && r.url.endsWith("/contents/notes/remove.md"))).toBe(true);
+		expect(requests.filter(r => r.method === "POST" && r.url.endsWith("/git/commits"))).toHaveLength(1);
+		expect(requests.some(r => r.method === "PATCH" && r.url.endsWith(`/git/refs/heads/${BRANCH}`))).toBe(true);
+		expect(requests.some(r => r.method === "POST" && r.url.endsWith("/git/trees"))).toBe(true);
+	});
+
+	it("uses custom commit message when provided", async () => {
+		const { requests } = installForgejoFetchMock();
+		const vault = makeVault();
+
+		await vault.applyChanges(
+			[{ path: "notes/manual.md", content: FileContent.fromPlainText("manual") }],
+			[],
+			{ commitMessage: "Manual vault update" }
+		);
+
+		const commitRequest = requests.find(r => r.method === "POST" && r.url.endsWith("/git/commits"));
+		expect(commitRequest?.body.message).toBe("Manual vault update");
 	});
 
 	it("returns current state without writing when there are no changes", async () => {
@@ -290,49 +306,4 @@ describe("RemoteForgejoVault", () => {
 		expect(requests.every(r => r.method === "GET")).toBe(true);
 	});
 
-	it("retries create as update when Forgejo reports file already exists", async () => {
-		const forgejo = installForgejoFetchMock();
-		forgejo.simulateAlreadyExists("notes/race.md");
-		const vault = makeVault();
-
-		const result = await vault.applyChanges(
-			[{ path: "notes/race.md", content: FileContent.fromPlainText("local") }],
-			[]
-		);
-
-		expect(result.changes).toEqual([
-			{ path: "notes/race.md", type: "ADDED" },
-		]);
-		expect(forgejo.requests.some(r => r.method === "POST" && r.url.endsWith("/contents/notes/race.md"))).toBe(true);
-		expect(forgejo.requests.some(r => r.method === "GET" && r.url.includes("/contents/notes/race.md"))).toBe(true);
-		expect(forgejo.requests.some(r => r.method === "PUT" && r.url.endsWith("/contents/notes/race.md"))).toBe(true);
-		expect(forgejo.requests.filter(r => r.method === "GET" && r.url.includes("/git/trees/"))).toHaveLength(4);
-		expect(result.newState["notes/race.md"]).toBe("notes/race.md-sha-3");
-	});
-
-	it("uses refreshed state when direct contents lookup misses an existing file", async () => {
-		const forgejo = installForgejoFetchMock();
-		forgejo.simulateAlreadyExists("notes/race.md");
-		const vault = makeVault();
-		const originalImplementation = forgejo.requestUrlMock.getMockImplementation()!;
-		forgejo.requestUrlMock.mockImplementation((async (request: any) => {
-			if ((request.method ?? "GET") === "GET" && request.url.includes("/contents/notes/race.md")) {
-				forgejo.requests.push({ method: "GET", url: request.url, body: undefined });
-				return jsonResponse(404, { message: "file not found" });
-			}
-			return await originalImplementation(request);
-		}) as any);
-
-		const result = await vault.applyChanges(
-			[{ path: "notes/race.md", content: FileContent.fromPlainText("local") }],
-			[]
-		);
-
-		expect(forgejo.requests.some(r => r.method === "GET" && r.url.includes("/contents/notes/race.md"))).toBe(true);
-		expect(forgejo.requests.filter(r => r.method === "GET" && r.url.includes("/git/trees/"))).toHaveLength(6);
-		expect(forgejo.requests.some(r => r.method === "PUT" && r.url.endsWith("/contents/notes/race.md"))).toBe(true);
-		expect(result.changes).toEqual([
-			{ path: "notes/race.md", type: "ADDED" },
-		]);
-	});
 });

@@ -97,7 +97,7 @@ Both local and remote caches use the canonical Git blob SHA format: `SHA1("blob 
   - Orchestrates unified bidirectional sync with 🔀 conflict handling
   - All clash detection happens inline at the start of sync
   - Phases: detect clashes → batch stat filesystem → resolve conflicts → push → pull → persist
-  - Handles both sync and push-only operations
+  - Handles automatic sync plus Manual Sync preview, selected push, and selected pull operations
 
 **Remote Provider Integration**:
 - Current stable default: GitHub backend with two components:

@@ -45,6 +45,17 @@ describe('GitignoreFilter.load', () => {
 
 		expect(adapter.stat).toHaveBeenCalledWith('.gitignore');
 	});
+
+	it('loads project-level .git/info/exclude as root-scoped rules', async () => {
+		const filter = await GitignoreFilter.load(
+			mockAdapter({ '.git/info/exclude': '*.secret\n!important.secret' }) as any,
+			['a.secret', 'important.secret', 'nested/a.secret']
+		);
+
+		expect(filter.ignores('a.secret')).toBe(true);
+		expect(filter.ignores('nested/a.secret')).toBe(true);
+		expect(filter.ignores('important.secret')).toBe(false);
+	});
 });
 
 describe('GitignoreFilter.ignores', () => {
