@@ -721,3 +721,150 @@
 .restore {
     display: visible;
 }
+
+/* === 手动同步弹窗 === */
+
+.fit-manual-modal {
+    width: min(820px, 92vw);
+}
+
+.fit-manual-content .setting-item-control {
+    flex-wrap: wrap;
+}
+
+.fit-manual-content .setting-item-info {
+    min-width: 0;
+}
+
+/* setHeading() 默认会给标题块加横向缩进, 这里抹平让它和下方文件行左对齐 */
+.fit-manual-content .setting-item-heading,
+.fit-manual-content .setting-item-heading .setting-item-info {
+    padding-inline: 0;
+    margin-inline: 0;
+}
+
+.fit-manual-content .setting-item-heading {
+    margin-top: 18px;
+    padding-top: 14px;
+    padding-bottom: 8px;
+    border-top: 1px solid var(--background-modifier-border);
+}
+
+/* Status 是第一个区块, 不需要顶部分隔与额外间距 */
+.fit-manual-content > .setting-item:first-child {
+    margin-top: 0;
+    border-top: none;
+}
+
+.fit-manual-commit-input {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 68px;
+    resize: vertical;
+}
+
+.fit-manual-list {
+    display: flex;
+    flex-direction: column;
+    margin: 0 0 4px;
+}
+
+.fit-manual-row {
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr);
+    align-items: center;
+    gap: 10px;
+    min-height: 36px;
+    padding: 6px 0;
+    border-top: 1px solid var(--background-modifier-border);
+    color: var(--text-normal);
+    cursor: pointer;
+}
+
+.fit-manual-row:hover {
+    background: var(--background-modifier-hover);
+}
+
+.fit-manual-row input[type="checkbox"] {
+    margin: 0;
+}
+
+.fit-manual-conflict {
+    grid-template-columns: auto auto minmax(0, 1fr);
+    color: var(--text-muted);
+}
+
+.fit-manual-op {
+    justify-self: start;
+    min-width: 74px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.78em;
+    line-height: 1.5;
+    text-align: center;
+    color: var(--text-muted);
+    background: var(--background-secondary-alt);
+}
+
+.fit-manual-op-added {
+    color: var(--color-green);
+    background: rgba(144, 238, 144, 0.16);
+}
+
+.fit-manual-op-modified,
+.fit-manual-op-pending {
+    color: var(--color-orange);
+    background: rgba(249, 180, 52, 0.16);
+}
+
+.fit-manual-op-removed {
+    color: var(--color-red);
+    background: rgba(255, 99, 71, 0.16);
+}
+
+.fit-manual-op-protected,
+.fit-manual-op-untracked {
+    color: var(--text-muted);
+    background: var(--background-modifier-border);
+}
+
+.fit-manual-path {
+    min-width: 0;
+    overflow-wrap: anywhere;
+    font-family: var(--font-monospace);
+    font-size: 0.9em;
+    color: var(--text-normal);
+}
+
+.fit-manual-empty {
+    padding: 8px 0;
+    color: var(--text-muted);
+    font-size: 0.9em;
+}
+
+@media (max-width: 700px) {
+    .fit-manual-modal {
+        width: 96vw;
+    }
+
+    .fit-manual-row {
+        grid-template-columns: auto minmax(0, 1fr);
+    }
+
+    .fit-manual-row .fit-manual-op {
+        grid-column: 2;
+    }
+
+    .fit-manual-path {
+        grid-column: 2;
+    }
+
+    .fit-manual-conflict {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .fit-manual-conflict .fit-manual-op,
+    .fit-manual-conflict .fit-manual-path {
+        grid-column: 1;
+    }
+}

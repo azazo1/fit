@@ -1,4 +1,4 @@
-import { App, Modal, Notice } from "obsidian";
+import { App, Modal, Notice, Setting, ButtonComponent } from "obsidian";
 import { ManualSyncPreview, FitSync } from "./fitSync";
 import { FileChange, FileClash } from "./util/changeTracking";
 import { SyncResult } from "./syncResult";
@@ -10,11 +10,11 @@ export class ManualSyncModal extends Modal {
 	private preview: ManualSyncPreview | null = null;
 	private selectedLocal = new Set<string>();
 	private selectedRemote = new Set<string>();
+	private commitMessage = "Update vault";
 	private commitInput: HTMLTextAreaElement | null = null;
 	private statusEl: HTMLElement | null = null;
-	private localListEl: HTMLElement | null = null;
-	private remoteListEl: HTMLElement | null = null;
-	private conflictListEl: HTMLElement | null = null;
+	private pushButton: ButtonComponent | null = null;
+	private pullButton: ButtonComponent | null = null;
 
 	constructor(app: App, fitSync: FitSync) {
 		super(app);
@@ -31,9 +31,11 @@ export class ManualSyncModal extends Modal {
 	}
 
 	private renderLoading() {
-		this.contentEl.empty();
-		this.contentEl.createEl("h2", { text: "Manual sync" });
-		this.statusEl = this.contentEl.createEl("p", { text: "Scanning changes...", cls: "fit-manual-status" });
+		this.prepareContent();
+		this.statusEl = new Setting(this.contentEl)
+			.setName("Status")
+			.setDesc("Scanning changes...")
+			.descEl;
 	}
 
 	private async refresh() {
@@ -50,57 +52,67 @@ export class ManualSyncModal extends Modal {
 	private render() {
 		if (!this.preview) return;
 		const { contentEl } = this;
-		contentEl.empty();
-		contentEl.createEl("h2", { text: "Manual sync" });
-		this.statusEl = contentEl.createEl("p", { cls: "fit-manual-status" });
-		this.setStatus("Select files, write a commit message, then push or pull.");
+		this.prepareContent();
 
-		const controls = contentEl.createDiv({ cls: "fit-manual-controls" });
-		const refreshButton = controls.createEl("button", { text: "Scan" });
-		refreshButton.addEventListener("click", () => this.refresh());
-		const pushButton = controls.createEl("button", { text: "Push selected" });
-		pushButton.addEventListener("click", () => this.pushSelected());
-		const pullButton = controls.createEl("button", { text: "Pull selected" });
-		pullButton.addEventListener("click", () => this.pullSelected());
+		this.statusEl = new Setting(contentEl)
+			.setName("Status")
+			.setDesc(this.getSummaryStatus())
+			.addButton(button => button
+				.setButtonText("Scan")
+				.onClick(() => this.refresh()))
+			.addButton(button => {
+				this.pullButton = button;
+				button.setButtonText("Pull selected").onClick(() => this.pullSelected());
+			})
+			.addButton(button => {
+				this.pushButton = button;
+				button.setCta().setButtonText("Push selected").onClick(() => this.pushSelected());
+			})
+			.descEl;
 
-		const messageWrap = contentEl.createDiv({ cls: "fit-manual-message" });
-		messageWrap.createEl("label", { text: "Commit message" });
-		this.commitInput = messageWrap.createEl("textarea");
-		this.commitInput.value = "Update vault";
+		new Setting(contentEl)
+			.setName("Commit message")
+			.setDesc("Used when pushing selected local changes.")
+			.addTextArea(text => {
+				text.setValue(this.commitMessage)
+					.onChange(value => { this.commitMessage = value; });
+				this.commitInput = text.inputEl;
+				text.inputEl.addClass("fit-manual-commit-input");
+			});
 
-		this.localListEl = contentEl.createDiv({ cls: "fit-manual-section" });
-		this.remoteListEl = contentEl.createDiv({ cls: "fit-manual-section" });
-		this.conflictListEl = contentEl.createDiv({ cls: "fit-manual-section" });
-		this.renderChangeSection("local", "Local changes to push", this.preview.safeLocal, this.localListEl);
-		this.renderChangeSection("remote", "Remote changes to pull", this.preview.safeRemote, this.remoteListEl);
-		this.renderConflictSection(this.preview.clashes);
+		this.renderChangeSection("local", "Local changes to push", this.preview.safeLocal, contentEl);
+		this.renderChangeSection("remote", "Remote changes to pull", this.preview.safeRemote, contentEl);
+		this.renderConflictSection(this.preview.clashes, contentEl);
+		this.updateActionButtons();
 	}
 
 	private renderChangeSection(section: ManualSection, title: string, changes: FileChange[], container: HTMLElement) {
-		container.empty();
-		const header = container.createEl("h3", { text: `${title} (${changes.length})` });
-		const buttonRow = container.createDiv({ cls: "fit-manual-section-actions" });
-		const allButton = buttonRow.createEl("button", { text: "All" });
-		allButton.addEventListener("click", () => {
-			this.setSelected(section, changes.map(change => change.path));
-			this.render();
-		});
-		const noneButton = buttonRow.createEl("button", { text: "None" });
-		noneButton.addEventListener("click", () => {
-			this.setSelected(section, []);
-			this.render();
-		});
+		new Setting(container)
+			.setHeading()
+			.setName(`${title} (${changes.length})`)
+			.setDesc(this.getSectionDescription(section))
+			.addButton(button => button
+				.setButtonText("All")
+				.onClick(() => {
+					this.setSelected(section, changes.map(change => change.path));
+					this.render();
+				}))
+			.addButton(button => button
+				.setButtonText("None")
+				.onClick(() => {
+					this.setSelected(section, []);
+					this.render();
+				}));
 
 		if (changes.length === 0) {
-			container.createEl("p", { text: "No changes.", cls: "fit-manual-empty" });
+			container.createDiv({ text: "No changes.", cls: "fit-manual-empty" });
 			return;
 		}
 
-		const list = container.createEl("ul", { cls: "fit-manual-list" });
+		const list = container.createDiv({ cls: "fit-manual-list" });
 		for (const change of changes) {
-			const item = list.createEl("li", { cls: "fit-manual-row" });
-			const label = item.createEl("label");
-			const checkbox = label.createEl("input", { type: "checkbox" });
+			const item = list.createEl("label", { cls: "fit-manual-row" });
+			const checkbox = item.createEl("input", { attr: { type: "checkbox" } });
 			checkbox.checked = this.getSelected(section).has(change.path);
 			checkbox.addEventListener("change", () => {
 				const selected = this.getSelected(section);
@@ -109,26 +121,29 @@ export class ManualSyncModal extends Modal {
 				} else {
 					selected.delete(change.path);
 				}
+				this.updateActionButtons();
 			});
-			label.createSpan({ text: ` ${change.type} `, cls: "fit-manual-op" });
-			label.createEl("code", { text: change.path });
+			this.createOperationBadge(item, change.type);
+			item.createSpan({ text: change.path, cls: "fit-manual-path" });
 		}
-		header.setText(`${title} (${changes.length})`);
 	}
 
-	private renderConflictSection(clashes: FileClash[]) {
-		if (!this.conflictListEl) return;
-		this.conflictListEl.empty();
-		this.conflictListEl.createEl("h3", { text: `Conflicts and blocked files (${clashes.length})` });
+	private renderConflictSection(clashes: FileClash[], container: HTMLElement) {
+		new Setting(container)
+			.setHeading()
+			.setName(`Conflicts and blocked files (${clashes.length})`)
+			.setDesc("Resolve these files outside this dialog before syncing them.");
+
 		if (clashes.length === 0) {
-			this.conflictListEl.createEl("p", { text: "No conflicts.", cls: "fit-manual-empty" });
+			container.createDiv({ text: "No conflicts.", cls: "fit-manual-empty" });
 			return;
 		}
-		const list = this.conflictListEl.createEl("ul", { cls: "fit-manual-list" });
+		const list = container.createDiv({ cls: "fit-manual-list" });
 		for (const clash of clashes) {
-			const item = list.createEl("li", { cls: "fit-manual-row fit-manual-conflict" });
-			item.createSpan({ text: `${clash.localState} / ${clash.remoteOp} `, cls: "fit-manual-op" });
-			item.createEl("code", { text: clash.path });
+			const item = list.createDiv({ cls: "fit-manual-row fit-manual-conflict" });
+			this.createOperationBadge(item, clash.localState);
+			this.createOperationBadge(item, clash.remoteOp);
+			item.createSpan({ text: clash.path, cls: "fit-manual-path" });
 		}
 	}
 
@@ -146,7 +161,7 @@ export class ManualSyncModal extends Modal {
 
 	private async pushSelected() {
 		const paths = Array.from(this.selectedLocal);
-		const message = this.commitInput?.value.trim() ?? "";
+		const message = this.commitInput?.value.trim() ?? this.commitMessage.trim();
 		if (paths.length === 0) {
 			this.setStatus("No local files selected.");
 			return;
@@ -187,17 +202,61 @@ export class ManualSyncModal extends Modal {
 	}
 
 	private renderError(error: unknown) {
-		this.contentEl.empty();
-		this.contentEl.createEl("h2", { text: "Manual sync" });
+		this.prepareContent();
 		const message = error instanceof Error ? error.message : String(error);
-		this.contentEl.createEl("p", { text: `Failed to scan changes: ${message}`, cls: "fit-manual-status" });
-		const retryButton = this.contentEl.createEl("button", { text: "Retry" });
-		retryButton.addEventListener("click", () => this.refresh());
+		this.statusEl = new Setting(this.contentEl)
+			.setName("Status")
+			.setDesc(`Failed to scan changes: ${message}`)
+			.addButton(button => button
+				.setCta()
+				.setButtonText("Retry")
+				.onClick(() => this.refresh()))
+			.descEl;
 	}
 
 	private setStatus(message: string) {
 		if (this.statusEl) {
-			this.statusEl.setText(message);
+			this.statusEl.textContent = message;
 		}
+	}
+
+	private prepareContent() {
+		this.setTitle("Manual sync");
+		this.modalEl.addClass("fit-manual-modal");
+		this.contentEl.addClass("fit-manual-content");
+		this.contentEl.empty();
+		this.commitInput = null;
+		this.pushButton = null;
+		this.pullButton = null;
+	}
+
+	private createOperationBadge(parent: HTMLElement, operation: string) {
+		const operationClass = operation.toLowerCase();
+		parent.createSpan({
+			text: this.formatOperation(operation),
+			cls: `fit-manual-op fit-manual-op-${operationClass}`
+		});
+	}
+
+	private formatOperation(operation: string): string {
+		return operation.charAt(0).toUpperCase() + operation.slice(1).toLowerCase();
+	}
+
+	private getSummaryStatus(): string {
+		if (!this.preview) {
+			return "Scanning changes...";
+		}
+		return `${this.preview.safeLocal.length} local, ${this.preview.safeRemote.length} remote, ${this.preview.clashes.length} blocked.`;
+	}
+
+	private getSectionDescription(section: ManualSection): string {
+		return section === "local"
+			? "Choose files to commit and push to the remote vault."
+			: "Choose remote updates to apply to this vault.";
+	}
+
+	private updateActionButtons() {
+		this.pushButton?.setDisabled(this.selectedLocal.size === 0);
+		this.pullButton?.setDisabled(this.selectedRemote.size === 0);
 	}
 }
