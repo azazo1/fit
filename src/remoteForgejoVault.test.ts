@@ -232,15 +232,24 @@ describe("RemoteForgejoVault", () => {
 			{ path: "notes/race.md", type: "ADDED" },
 		]);
 		expect(forgejo.requests.some(r => r.method === "POST" && r.url.endsWith("/contents/notes/race.md"))).toBe(true);
+		expect(forgejo.requests.some(r => r.method === "GET" && r.url.endsWith("/contents/notes/race.md"))).toBe(true);
 		expect(forgejo.requests.some(r => r.method === "PUT" && r.url.endsWith("/contents/notes/race.md"))).toBe(true);
+		expect(forgejo.requests.filter(r => r.method === "GET" && r.url.includes("/git/trees/"))).toHaveLength(2);
 		expect(result.newState["notes/race.md"]).toBe("notes/race.md-sha-3");
 	});
 
-	it("uses contents API fallback when tree refresh misses an existing file", async () => {
+	it("uses tree fallback when contents API cannot find an existing file", async () => {
 		const forgejo = installForgejoFetchMock();
 		forgejo.simulateAlreadyExists("notes/race.md");
-		forgejo.hideAlreadyExistsPathFromTree();
 		const vault = makeVault();
+		const originalImplementation = forgejo.requestUrlMock.getMockImplementation()!;
+		forgejo.requestUrlMock.mockImplementation((async (request: any) => {
+			if ((request.method ?? "GET") === "GET" && request.url.endsWith("/contents/notes/race.md")) {
+				forgejo.requests.push({ method: "GET", url: request.url, body: undefined });
+				return jsonResponse(404, { message: "file not found" });
+			}
+			return await originalImplementation(request);
+		}) as any);
 
 		const result = await vault.applyChanges(
 			[{ path: "notes/race.md", content: FileContent.fromPlainText("local") }],
@@ -248,6 +257,7 @@ describe("RemoteForgejoVault", () => {
 		);
 
 		expect(forgejo.requests.some(r => r.method === "GET" && r.url.endsWith("/contents/notes/race.md"))).toBe(true);
+		expect(forgejo.requests.filter(r => r.method === "GET" && r.url.includes("/git/trees/"))).toHaveLength(3);
 		expect(forgejo.requests.some(r => r.method === "PUT" && r.url.endsWith("/contents/notes/race.md"))).toBe(true);
 		expect(result.changes).toEqual([
 			{ path: "notes/race.md", type: "ADDED" },

@@ -341,8 +341,8 @@ export class RemoteForgejoVault implements IRemoteVault {
 				throw error;
 			}
 
-			const fresh = await this.readFromSource(true);
-			const freshSha = fresh.state[path] ?? await this.readExistingContentSha(contentPath);
+			const freshSha = await this.readExistingContentSha(contentPath) ??
+				(await this.readFromSource(true)).state[path];
 			if (!freshSha) {
 				throw error;
 			}
