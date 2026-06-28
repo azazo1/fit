@@ -65,14 +65,15 @@ const str = Array.from(uint8Array, byte => String.fromCharCode(byte)).join('');
 - `base64ToArrayBuffer()` - [src/util/obsidianHelpers.ts:5](../src/util/obsidianHelpers.ts#L5)
 - `Vault.readBinary()` - Always use this instead of `vault.read()` for reliable binary detection
 
-### fetch() for Remote Provider APIs
+### Forgejo/Gitea API 使用 Obsidian requestUrl()
 
-**Status:** Safe - Web API available in Obsidian desktop and mobile runtimes
+**状态:** 安全 - Obsidian API 可用于桌面端和移动端运行时
 
-- `ForgejoConnection` and `RemoteForgejoVault` use `fetch()` against Forgejo/Gitea `/api/v1`
-- Requests use `Authorization: token ...` and JSON request/response bodies
-- No Node.js HTTP, filesystem, process, or SSH APIs are required
-- GitHub support continues to use Octokit, which must remain compatible with the mobile WebView environment
+- `ForgejoConnection` 和 `RemoteForgejoVault` 使用 `requestUrl()` 访问 Forgejo/Gitea `/api/v1`
+- 请求使用 `Authorization: token ...` 和 JSON request/response body
+- `requestUrl()` 可以避免 Obsidian `app://obsidian.md` origin 触发的浏览器 CORS preflight 阻断
+- 不需要 Node.js HTTP, filesystem, process, 或 SSH API
+- GitHub 支持继续使用 Octokit, 仍需保持移动端 WebView 兼容
 
 ## Unsafe Patterns to Avoid
 

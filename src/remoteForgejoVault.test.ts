@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { requestUrl } from "obsidian";
 import { RemoteForgejoVault } from "./remoteForgejoVault";
 import { FileContent } from "./util/contentEncoding";
 import { fitLogger } from "./logger";
@@ -15,12 +16,14 @@ const OWNER = "azazo1";
 const REPO = "mynote";
 const BRANCH = "main";
 
-function jsonResponse(status: number, body: unknown = {}, statusText = ""): Response {
-	return new Response(JSON.stringify(body), {
+function jsonResponse(status: number, body: unknown = {}, text = "") {
+	return {
 		status,
-		statusText,
+		json: body,
+		text,
 		headers: { "Content-Type": "application/json" },
-	});
+		arrayBuffer: new ArrayBuffer(0),
+	};
 }
 
 function makeVault() {
@@ -46,9 +49,11 @@ function installForgejoFetchMock() {
 		["sha-a", "YWxwaGE="],
 	]);
 
-	const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
-		const method = init?.method ?? "GET";
-		const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+	const requestUrlMock = vi.mocked(requestUrl);
+	requestUrlMock.mockImplementation((async (request: any) => {
+		const url = request.url;
+		const method = request.method ?? "GET";
+		const body = request.body ? JSON.parse(String(request.body)) : undefined;
 		requests.push({ method, url, body });
 		const apiPath = url.replace(`${BASE_URL}/api/v1`, "");
 
@@ -101,10 +106,9 @@ function installForgejoFetchMock() {
 		}
 
 		return jsonResponse(500, { message: `Unhandled ${method} ${apiPath}` });
-	});
+	}) as any);
 
-	vi.stubGlobal("fetch", fetchMock);
-	return { requests, fetchMock, state, blobs };
+	return { requests, requestUrlMock, state, blobs };
 }
 
 describe("RemoteForgejoVault", () => {

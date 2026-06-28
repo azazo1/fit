@@ -1,20 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { requestUrl } from "obsidian";
 import { ForgejoConnection, normalizeBaseUrl } from "./forgejoConnection";
 
-function jsonResponse(status: number, body: unknown = {}, statusText = ""): Response {
-	return new Response(JSON.stringify(body), {
+function jsonResponse(status: number, body: unknown = {}, text = "") {
+	return {
 		status,
-		statusText,
+		json: body,
+		text,
 		headers: { "Content-Type": "application/json" },
-	});
+		arrayBuffer: new ArrayBuffer(0),
+	};
 }
 
 describe("ForgejoConnection", () => {
-	let fetchMock: ReturnType<typeof vi.fn>;
+	const requestUrlMock = vi.mocked(requestUrl);
 
 	beforeEach(() => {
-		fetchMock = vi.fn();
-		vi.stubGlobal("fetch", fetchMock);
+		requestUrlMock.mockReset();
 	});
 
 	afterEach(() => {
@@ -27,7 +29,7 @@ describe("ForgejoConnection", () => {
 	});
 
 	it("maps authentication failure to VaultError.authentication", async () => {
-		fetchMock.mockResolvedValueOnce(jsonResponse(401, { message: "bad token" }));
+		requestUrlMock.mockResolvedValueOnce(jsonResponse(401, { message: "bad token" }) as any);
 		const connection = new ForgejoConnection("https://git.acodev.top", "token");
 
 		await expect(connection.getAuthenticatedUser()).rejects.toMatchObject({
@@ -38,9 +40,9 @@ describe("ForgejoConnection", () => {
 	});
 
 	it("maps missing repo list to VaultError.remoteNotFound", async () => {
-		fetchMock
-			.mockResolvedValueOnce(jsonResponse(200, { login: "alice" }))
-			.mockResolvedValueOnce(jsonResponse(404, { message: "not found" }));
+		requestUrlMock
+			.mockResolvedValueOnce(jsonResponse(200, { login: "alice" }) as any)
+			.mockResolvedValueOnce(jsonResponse(404, { message: "not found" }) as any);
 		const connection = new ForgejoConnection("https://git.acodev.top", "token");
 
 		await expect(connection.getReposForOwner("alice")).rejects.toMatchObject({
@@ -51,7 +53,7 @@ describe("ForgejoConnection", () => {
 	});
 
 	it("maps missing branch list to VaultError.remoteNotFound", async () => {
-		fetchMock.mockResolvedValueOnce(jsonResponse(404, { message: "repo not found" }));
+		requestUrlMock.mockResolvedValueOnce(jsonResponse(404, { message: "repo not found" }) as any);
 		const connection = new ForgejoConnection("https://git.acodev.top", "token");
 
 		await expect(connection.getBranches("alice", "missing")).rejects.toMatchObject({

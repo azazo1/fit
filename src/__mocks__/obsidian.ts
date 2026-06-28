@@ -26,6 +26,8 @@ export const base64ToArrayBuffer = vi.fn((base64: string) => {
 	return bytes.buffer;
 });
 
+export const requestUrl = vi.fn();
+
 export class TFile {
 	path!: string;
 	name!: string;

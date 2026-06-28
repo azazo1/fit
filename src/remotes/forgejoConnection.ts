@@ -1,4 +1,5 @@
 import { VaultError } from "../vault";
+import { forgejoRequest } from "./forgejoHttp";
 
 export interface ForgejoUser {
 	owner: string;
@@ -66,50 +67,10 @@ export class ForgejoConnection {
 	}
 
 	private async request<T>(method: string, path: string): Promise<T> {
-		try {
-			const response = await fetch(`${this.baseUrl}/api/v1${path}`, {
-				method,
-				headers: {
-					"Accept": "application/json",
-					"Authorization": `token ${this.token}`,
-				},
-			});
-
-			if (!response.ok) {
-				await this.throwResponseError(response);
-			}
-
-			return await response.json() as T;
-		} catch (error) {
-			if (error instanceof VaultError) throw error;
-			throw VaultError.network(
-				error instanceof Error ? error.message : "Couldn't reach Forgejo API",
-				{ originalError: error }
-			);
-		}
-	}
-
-	private async throwResponseError(response: Response): Promise<never> {
-		const message = await readErrorMessage(response);
-		if (response.status === 401 || response.status === 403) {
-			throw VaultError.authentication(message || "Authentication failed. Check your Forgejo token.");
-		}
-		if (response.status === 404) {
-			throw VaultError.remoteNotFound(message || "Forgejo resource not found");
-		}
-		throw VaultError.network(message || `Forgejo API request failed with status ${response.status}`);
+		return forgejoRequest<T>(this.baseUrl, this.token, method, path);
 	}
 }
 
 export function normalizeBaseUrl(baseUrl: string): string {
 	return baseUrl.trim().replace(/\/+$/, "");
-}
-
-async function readErrorMessage(response: Response): Promise<string> {
-	try {
-		const data = await response.json() as { message?: string };
-		return data.message ?? response.statusText;
-	} catch {
-		return response.statusText;
-	}
 }
